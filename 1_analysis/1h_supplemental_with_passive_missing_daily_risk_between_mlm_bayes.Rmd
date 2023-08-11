@@ -1,0 +1,178 @@
+---
+title: "Supplemental Analyses"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+options(buildtools.check = function(action) TRUE)
+```
+
+# Data setup
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+```
+
+```{r}
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+
+## Weekly risk data
+```{r}
+load('../../cleaned_data/risk.rda')
+
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID') 
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+```
+
+## Create binary indicator for whether there is any passive data observed
+```{r}
+daily = daily %>%
+  mutate(no_passive = ifelse(missing_gps == 1 & missing_accel == 1 & missing_keyboard == 1, 1, 0))
+
+risk_missing = left_join(risk_missing, dplyr::select(daily, no_passive, ID, week=date), by = c('ID', 'week'))
+```
+
+
+
+```{r}
+sociodemographic_predictors = sociodemographic_predictors[!grepl('interview_date_numeric', sociodemographic_predictors)]
+```
+
+# Supplemental Analysis Adding a 1-day Lag Missingness Predictor (to account for autocorrelation of missingness)
+
+```{r}
+m_formula_template_daily_w_nopassive = as.formula(paste('missing_daily ~ no_passive +
+                                                 scaled_predictor + personal_time_z + weekend + summerbreak +', 
+                                            paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_formula_template_risk_w_nopassive = as.formula(paste('risk_missing ~ no_passive + scaled_predictor + 
+                                                personal_time_z + summerbreak +', 
+                                           paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+```
+
+## Sociodemographic models
+```{r}
+m_sociodemographic_daily_w_nopassive = as.formula(paste('missing_daily ~ no_passive + personal_time_z + weekend + summerbreak +', 
+                                            paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_sociodemographic_risk_w_nopassive = as.formula(paste('risk_missing ~ no_passive + personal_time_z + summerbreak +', 
+                                           paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+```
+
+
+# Run models & get ORs for each outcome
+
+```{r risk_models}
+risk_outputs = or_pipeline(df = risk_missing, 
+                      model_formula_template = m_formula_template_risk_w_nopassive,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+risk_outputs = risk_outputs[names(risk_outputs) != 'models_df']
+save(risk_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_risk_w_nopassive.rda')
+gc()
+```
+
+```{r daily_models}
+daily_outputs = or_pipeline(df = daily, 
+                      model_formula_template = m_formula_template_daily_w_nopassive,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+daily_outputs = daily_outputs[names(daily_outputs) != 'models_df']
+save(daily_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_daily_w_nopassive.rda')
+gc()
+```
+
+
+
+```{r}
+load('model_outputs/baseline_predictors_missingness_brm_daily_w_nopassive.rda')
+load('model_outputs/baseline_predictors_missingness_brm_risk_w_nopassive.rda')
+
+combined_or_bayes = rbind(risk_outputs$or_df %>% mutate(type = 'Weekly SI Survey'),
+                    daily_outputs$or_df %>% mutate(type = 'Daily Mood Survey'))
+
+clinical_or_mlm_bayes = baseline_predictors_missingness_or_plot(combined_or_bayes, m = m, bayes = TRUE)
+```
+
+
+
+# Sociodemographic models 
+```{r}
+# Models
+daily_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_daily_w_nopassive, df = daily)
+risk_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_risk_w_nopassive, df = risk_missing)
+
+# Extract OR
+daily_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(daily_sociodem_model_brm, type = 'Daily Mood Survey', 
+                                                              conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+
+risk_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(risk_sociodem_model_brm, type = 'Weekly SI Survey', 
+                                                              conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+
+# Combine
+combined_sociodem_or_brm = rbind(daily_sociodem_or_brm, risk_sociodem_or_brm)
+
+save(daily_sociodem_model_brm, risk_sociodem_model_brm, combined_sociodem_or_brm, file = 'model_outputs/sociodemographic_predictors_missingness_brm_w_nopassive.rda')
+```
+
+# Sociodem plot
+
+```{r}
+combined_sociodem_or_brm = combined_sociodem_or_brm %>% dplyr::filter(!grepl('no_passive', term))
+sociodem_plot_bayes = make_sociodem_or_plot(sociodem_or_df = combined_sociodem_or_brm, m = m, bayes=TRUE)
+```
+
+# Combined plot 
+```{r}
+fig2_odds_ratio_bayes = cowplot::plot_grid(clinical_or_mlm_bayes, sociodem_plot_bayes, ncol = 1, align = 'v', axis = 'lr',
+                   labels = c('A', 'B'), rel_heights = c(1.5, 1))
+
+cowplot::save_plot(fig2_odds_ratio_bayes, filename = '../../figures/supplement/clinical_sociodem_baseline_predictors_with_nopassive_between_missingness_odds_ratio_brm.png',
+                   base_height = 10, base_width = 7)
+```

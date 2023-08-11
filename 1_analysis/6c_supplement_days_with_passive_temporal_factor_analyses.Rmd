@@ -1,0 +1,182 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggrepel)
+library(brms)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+```
+
+```{r}
+# Palette from http://mkweb.bcgsc.ca/colorblind/palettes/8.color.blindness.palette.txt
+pal = c('#000000','#d55e00', '#3DB7E9', '#F748A5', '#359B73','#2271B2', '#e69f00', '#f0e442')
+pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+```
+
+
+```{r}
+load('../../cleaned_data/risk.rda')
+daily = dplyr::filter(daily, TIMEPNT==6, day_num < 200)
+```
+
+# 1. Models for OR
+
+
+## Time models for daily & passive 
+```{r}
+comparisons = 3
+conf_level_corrected = 1-(0.05/comparisons)
+
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+daily_long = daily %>%
+  group_by(ID) %>%
+  mutate(day_num_center = scale(day_num, center = TRUE, scale = FALSE)) %>%
+  ungroup() %>%
+  mutate(week_num_center = day_num_center/7,
+         month_num_center = day_num_center/30.4) %>%
+  pivot_longer(contains('missing')) 
+
+# lag missing indicators
+daily_long = daily_long %>% group_by(name, ID) %>%
+  mutate(value_lag1 = lag(value, n= 1)) %>%
+  ungroup()
+
+time_models_daily_basis_wlag = daily_long %>% group_by(name) %>%
+  nest() %>%
+  mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ value_lag1 + month_num_center + summerbreak + weekend + (month_num_center + summerbreak + weekend|ID),
+                                                         family = bernoulli(link = 'logit'), 
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                   prior = beta_prior)))
+```
+ 
+
+## Time model for weekly SI 
+```{r}
+risk_week_present = mutate(risk_week_present, 
+                           week_num_center = scale(week_num, center = TRUE, scale = FALSE),
+                           month_num_center = week_num_center/4.3,
+                           summerbreak=factor(ifelse(month %in% c(7,8), 1, 0))) %>%
+    dplyr::filter(week_num <= 27, week_num > 1, TIMEPNT==6) 
+
+
+risk_week_present = risk_week_present %>%
+  group_by(ID) %>%
+  mutate(risk_missing_lag1 = lag(risk_missing, n=1)) %>%
+  ungroup()
+
+time_model_week_risk_wlag = brms::brm(data = risk_week_present, risk_missing ~ month_num_center + summerbreak + (month_num_center + summerbreak |ID),
+                                                         family = bernoulli(link = 'logit'), 
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                   prior = beta_prior)
+
+save(time_models_daily_basis_wlag, time_model_week_risk_wlag, file = 'model_outputs/design_features_predict_missingness_wlag.rda')
+```
+
+
+## Calculate Or
+
+
+## Risk OR
+```{r}
+time_or_week_risk_uncorrected_wlag = time_model_week_risk_wlag %>% fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)) %>%
+  mutate(name = 'Weekly SI Survey', corrected = 'or_uncorrected')
+
+time_or_week_risk_corrected_wlag = time_model_week_risk_wlag %>% fixef(., probs =c((1-conf_level_corrected)/2, 
+                                                                 1-(1-conf_level_corrected)/2)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)) %>%
+  mutate(name = 'Weekly SI Survey', corrected = 'or_corrected')
+
+
+time_or_week_risk_wlag = rbind(time_or_week_risk_corrected_wlag, time_or_week_risk_uncorrected_wlag)
+
+```
+
+### OR for daily time models
+```{r}
+time_or_daily_basis_brm_wlag = time_models_daily_basis_wlag %>%
+  mutate(or_corrected = purrr::map(time_model, ~fixef(., probs =c((1-conf_level_corrected)/2, 
+                                                                 1-(1-conf_level_corrected)/2)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         or_uncorrected = purrr::map(time_model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)))) %>%
+  pivot_longer(c(or_corrected, or_uncorrected),
+               names_to = 'corrected') %>%
+  unnest(value) %>%
+  dplyr::select(-time_model, -data)
+```
+
+## Combine outputs & plot
+
+```{r}
+time_or_daily_basis_wlag = rbind(time_or_daily_basis_brm_wlag, time_or_week_risk_wlag)
+
+
+time_or_daily_basis_wlag =  time_or_daily_basis_wlag %>%
+  mutate(term = dplyr::recode(term,
+                              'weekend'='Weekend > Week Days',
+                              'summerbreak1'='Summer Break > School Year',
+                              'month_num_center'='+1 Month Since Baseline'),
+         name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+or_plot_wlag = time_or_daily_basis_wlag %>%
+  dplyr::filter(corrected == 'or_corrected') %>%
+  dplyr::filter(! term %in% c('Intercept', 'sd__(Intercept)', 'value_lag1')) %>%
+  ggplot(data = ., aes(x = term, y = estimate, color=name)) +
+  geom_point(position = position_dodge(0.2)) + 
+  geom_errorbar(data = dplyr::filter(time_or_daily_basis_wlag,
+                                     corrected == 'or_uncorrected',
+                                     !term %in% c('Intercept', 'sd__(Intercept)', 'value_lag1')),
+                                     aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2),
+                lwd = 1) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  coord_flip() +
+  scale_y_log10() +
+  labs(y = 'Association with missingness\nAdjusted Odds Ratio',
+       x = NULL, color = NULL) +
+  scale_color_manual(values = pal2) +
+  theme(legend.position = 'none')
+
+
+ggsave(or_plot_wlag, filename = '../../figures/supplement/temporal_trends_or_wlag.png', height = 5, width = 4)
+
+```
+
+

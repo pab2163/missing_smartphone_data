@@ -1,0 +1,233 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+library(DescTools)
+options(buildtools.check = function(action) TRUE)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+theme_set(theme_bw())
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+sleep = read_csv('../../cleaned_data/daily_sleep_jackie_cleaning.csv') %>%
+  dplyr::select(-`...1`,date = dt_feature, -daily)
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+## Prepare data for models 
+
+Median scale passive variables
+```{r}
+median_scale = function(x, remove_na){
+  median_scale_x = x - median(x, na.rm=remove_na)
+  return(median_scale_x)
+}
+
+
+median_split = function(x){
+  median_split_x = ifelse(x >= median(x, na.rm = TRUE), 'above', 'below')
+  return(median_split_x)
+}
+
+
+
+
+daily = left_join(daily, mutate(sleep, ID = as.character(ID)), by = c('ID', 'date')) 
+
+# clean keyboard features
+daily = daily %>%
+  mutate(prop_word_pos_day = DescTools::Winsorize(prop_word_pos_day, na.rm = TRUE),
+         prop_word_neg_day = DescTools::Winsorize(prop_word_neg_day, na.rm = TRUE),
+         n_char_day = DescTools::Winsorize(n_char_day, na.rm = TRUE)) %>%
+  group_by(ID) %>%
+  mutate(prop_word_pos_day_medsplit = median_split(prop_word_pos_day),
+         prop_word_neg_day_medsplit = median_split(prop_word_neg_day),
+         travel_day_hours_medsplit = median_split(amt_travel_day_minutes),
+         home_day_hours_medsplit = median_split(amt_home_day_minutes),
+         gps_capture_medsplit = median_split(n_capture_day),
+         n_char_day_medsplit = median_split(n_char_day),
+         sleep_on_medsplit = median_split(sleep_on), 
+         sleep_off_medsplit = median_split(sleep_off), 
+         sleep_duration_medsplit = median_split(sleep_duration)) %>%
+  mutate(prop_word_pos_day_medsplit = replace_na(prop_word_pos_day_medsplit, 'missing'),
+         prop_word_neg_day_medsplit = replace_na(prop_word_neg_day_medsplit, 'missing'),
+         travel_day_hours_medsplit = replace_na(travel_day_hours_medsplit, 'missing'),
+         home_day_hours_medsplit = replace_na(home_day_hours_medsplit, 'missing'),
+         gps_capture_medsplit = replace_na(gps_capture_medsplit, 'missing'),
+         n_char_day_medsplit = replace_na(n_char_day_medsplit, 'missing'),
+         sleep_on_medsplit = replace_na(sleep_on_medsplit, 'missing'),
+         sleep_off_medsplit = replace_na(sleep_off_medsplit, 'missing'),
+         sleep_duration_medsplit = replace_na(sleep_duration_medsplit, 'missing')) %>%
+  mutate(prop_word_pos_day_medsplit_lag1 = lag(prop_word_pos_day_medsplit, n = 1),
+                 prop_word_neg_day_medsplit_lag1 = lag(prop_word_neg_day_medsplit, n = 1),
+                 home_day_hours_medsplit_lag1 =lag(home_day_hours_medsplit, n = 1),
+                 travel_day_hours_medsplit_lag1 =lag(travel_day_hours_medsplit, n = 1),
+                 gps_capture_medsplit_lag1 = lag(gps_capture_medsplit, n = 1),
+                 sleep_on_medsplit_lag1 = lag(sleep_on_medsplit, n = 1),
+                 sleep_off_medsplit_lag1 = lag(sleep_off_medsplit, n = 1),
+                 sleep_duration_medsplit_lag1 = lag(sleep_duration_medsplit, n = 1),
+                 n_char_day_medsplit_medsplit_lag1 = lag(n_char_day_medsplit, n = 1)
+         ) %>%
+  ungroup()
+
+
+daily_check = daily %>%
+  dplyr::select(ID, contains('medsplit'), contains('sleep'))
+
+```
+
+
+```{r}
+passive_predict_daily_missing_formula = as.formula('missing_daily ~ value + weekend + summerbreak + personal_time_z + (value|ID)')
+```
+
+
+```{r}
+daily_long = daily %>%
+  pivot_longer(contains('medsplit'))
+
+
+num_predictors = 9
+conf_level = 1-(.05/num_predictors)
+```
+
+## Fit models (3way split with missing)
+```{r}
+passive_predict_daily_missing_models_medsplit = daily_long %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = passive_predict_daily_missing_formula,
+                                        family = bernoulli(link = 'logit'),
+                                        chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+save(passive_predict_daily_missing_models_medsplit, file = 'model_outputs/passive_predict_daily_missingness_brm_medsplit.rda')
+
+load('model_outputs/passive_predict_daily_missingness_brm_medsplit.rda')
+```
+
+## Extract Odds Ratios from Models
+
+```{r}
+passive_predict_daily_missing_or_uncorrected = passive_predict_daily_missing_models_medsplit %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
+                                                  at = list('value'=c('above', 'below'))) %>%
+                           pairs(reverse = FALSE) %>%
+                           confint(level = 0.95) %>%
+                           data.frame())) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model)
+
+passive_predict_daily_missing_or_corrected= passive_predict_daily_missing_models_medsplit %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
+                                                  at = list('value'=c('above', 'below'))) %>%
+                           pairs(reverse = FALSE) %>%
+                           confint(level = conf_level) %>%
+                           data.frame())) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model)
+
+passive_predict_daily_missing_or_corrected  = passive_predict_daily_missing_or_corrected %>%
+  mutate(lag = ifelse(grepl('lag1', name), '1 Day Prior', 'Same Day'),
+         name = gsub("_lag1","",name),
+                  grouping = case_when(
+           grepl('word',name)  ~ 'Keyboard Input',
+           grepl('char', name) ~ 'Keyboard Input',
+           grepl('sleep', name) ~ 'Sleep',
+           grepl('hours', name) ~ 'GPS',
+           grepl('gps', name) ~ 'GPS',
+         ),
+         name_recode = dplyr::recode(name,
+                              'travel_day_hours_medsplit'='Hours Traveling\nHigh>Low',
+                              'sleep_on_medsplit'='Bedtime\nHigh>Low',
+                              'sleep_off_medsplit'='Wake Time\nHigh>Low',
+                              'sleep_duration_medsplit'='Sleep Duration\nHigh>Low',
+                              'prop_word_pos_day_medsplit'='% Positive Words\nHigh>Low',
+                              'prop_word_neg_day_medsplit'='% Negative Words\nHigh>Low',
+                              'n_char_day_medsplit'='# of characters typed\nHigh>Low',
+                              'n_char_day_medsplit_medsplit'='# of characters typed\nHigh>Low',
+                              'home_day_hours_medsplit'='Hours Home\nHigh>Low',
+                              'gps_capture_medsplit'='# of GPS measurements\nHigh>Low'))
+
+
+passive_predict_daily_missing_or_uncorrected  = passive_predict_daily_missing_or_uncorrected %>%
+  mutate(lag = ifelse(grepl('lag1', name), '1 Day Prior', 'Same Day'),
+         name = gsub("_lag1","",name),
+         grouping = case_when(
+           grepl('word',name)  ~ 'Keyboard Input',
+           grepl('char', name) ~ 'Keyboard Input',
+           grepl('sleep', name) ~ 'Sleep',
+           grepl('hours', name) ~ 'GPS',
+           grepl('gps', name) ~ 'GPS',
+         ),
+         name_recode = dplyr::recode(name,
+                              'travel_day_hours_medsplit'='Hours Traveling\nHigh>Low',
+                              'sleep_on_medsplit'='Bedtime\nHigh>Low',
+                              'sleep_off_medsplit'='Wake Time\nHigh>Low',
+                              'sleep_duration_medsplit'='Sleep Duration\nHigh>Low',
+                              'prop_word_pos_day_medsplit'='% Positive Words\nHigh>Low',
+                              'prop_word_neg_day_medsplit'='% Negative Words\nHigh>Low',
+                              'n_char_day_medsplit'='# of characters typed\nHigh>Low',
+                              'n_char_day_medsplit_medsplit'='# of characters typed\nHigh>Low',
+                              'home_day_hours_medsplit'='Hours Home\nHigh>Low',
+                              'gps_capture_medsplit'='# of GPS measurements\nHigh>Low'))
+
+
+sig_frame = left_join(passive_predict_daily_missing_or_uncorrected,
+          dplyr::select(passive_predict_daily_missing_or_corrected, lower_corrected = lower.HPD, upper_corrected = upper.HPD, name, contrast, lag),
+          by = c('name', 'contrast', 'lag')) %>%
+  mutate(sig_star = case_when(
+    (lower_corrected-1)*(upper_corrected-1) > 0  ~ '#',
+    (lower_corrected-1)*(upper_corrected-1) <= 0 & (lower.HPD-1)*(upper.HPD-1) > 0 ~ '+',
+    (lower.HPD-1)*(upper.HPD-1) <= 0 ~ ''))
+
+passive_predict_daily_missing_or_plot = passive_predict_daily_missing_or_uncorrected %>%
+  ggplot(data = ., aes(x = name_recode, y = odds.ratio, color = lag)) +
+  geom_point(position = position_dodge(width=0.5), size = 2) +
+  geom_errorbar(data = passive_predict_daily_missing_or_corrected,
+                aes(ymin = lower.HPD, ymax = upper.HPD),width = 0,
+                position = position_dodge(width=0.5)) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD), width = 0, lwd = 1,
+                position = position_dodge(width=0.5)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  geom_text(data = sig_frame, aes(x = name_recode, y = upper_corrected*1.05, label = sig_star, color = lag),
+            position = position_dodge(width=0.5), show.legend = FALSE) +
+  facet_grid(rows = vars(grouping), drop=TRUE, scales = 'free', switch = 'both') +
+  scale_y_log10() +
+  coord_flip() +
+  labs(color = 'Time window of passive sensor\nrelative to daily mood survey', 
+       x = NULL, y = 'Association with missing daily mood\nAdjusted Odds Ratio') +
+  theme(legend.position = 'bottom',
+        plot.margin = unit(c(2,3.5,1,0), "lines")) +
+  guides(color=guide_legend(nrow=2,byrow=TRUE)) +
+  scale_color_manual(values = c('cadetblue2', 'Dark Blue'))
+
+ggsave(passive_predict_daily_missing_or_plot, file = '../../figures/supplement/missing_daily_proximal_passive_or_medsplit.png', height=8, width = 5)
+```
+

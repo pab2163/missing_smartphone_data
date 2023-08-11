@@ -1,0 +1,439 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+#library(ggrepel)
+library(brms)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+```
+
+```{r}
+# Palette from http://mkweb.bcgsc.ca/colorblind/palettes/8.color.blindness.palette.txt
+pal = c('#000000','#d55e00', '#3DB7E9', '#F748A5', '#359B73','#2271B2', '#e69f00', '#f0e442')
+pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+```
+
+
+```{r}
+load('../../cleaned_data/risk.rda')
+daily = dplyr::filter(daily, TIMEPNT==6, day_num < 200)
+```
+
+# 1. Models for OR
+
+
+## Time models for daily & passive 
+```{r}
+comparisons = 3
+conf_level_corrected = 1-(0.05/comparisons)
+
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+daily_long = daily %>%
+  group_by(ID) %>%
+  mutate(day_num_center = scale(day_num, center = TRUE, scale = FALSE)) %>%
+  ungroup() %>%
+  mutate(week_num_center = day_num_center/7,
+         month_num_center = day_num_center/30.4) %>%
+  pivot_longer(contains('missing')) 
+```
+
+
+```{r}
+time_models_daily_basis = daily_long %>% group_by(name) %>%
+  nest() %>%
+  mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ month_num_center + summerbreak + weekend + (month_num_center + summerbreak + weekend|ID),
+                                                         family = bernoulli(link = 'logit'), 
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                   prior = beta_prior)))
+```
+ 
+
+## Time model for weekly SI 
+```{r}
+risk_week_present = mutate(risk_week_present, 
+                           week_num_center = scale(week_num, center = TRUE, scale = FALSE),
+                           month_num_center = week_num_center/4.3,
+                           summerbreak=factor(ifelse(month %in% c(7,8), 1, 0))) %>%
+    dplyr::filter(week_num <= 27, week_num > 1, TIMEPNT==6) 
+
+
+time_model_week_risk = brms::brm(data = risk_week_present, risk_missing ~ month_num_center + summerbreak + (month_num_center + summerbreak |ID),
+                                                         family = bernoulli(link = 'logit'), 
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                   prior = beta_prior)
+
+save(time_models_daily_basis, time_model_week_risk, file = 'model_outputs/design_features_predict_missingness.rda')
+```
+
+
+## Calculate Or
+
+
+## Risk OR
+```{r}
+load('model_outputs/design_features_predict_missingness.rda')
+time_or_week_risk_uncorrected = time_model_week_risk %>% fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)) %>%
+  mutate(name = 'Weekly SI Survey', corrected = 'or_uncorrected')
+
+time_or_week_risk_corrected = time_model_week_risk %>% fixef(., probs =c((1-conf_level_corrected)/2, 
+                                                                 1-(1-conf_level_corrected)/2)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)) %>%
+  mutate(name = 'Weekly SI Survey', corrected = 'or_corrected')
+
+
+time_or_week_risk = rbind(time_or_week_risk_corrected, time_or_week_risk_uncorrected)
+
+```
+
+### OR for daily time models
+```{r}
+time_or_daily_basis_brm = time_models_daily_basis %>%
+  mutate(or_corrected = purrr::map(time_model, ~fixef(., probs =c((1-conf_level_corrected)/2, 
+                                                                 1-(1-conf_level_corrected)/2)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         or_uncorrected = purrr::map(time_model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)))) %>%
+  pivot_longer(c(or_corrected, or_uncorrected),
+               names_to = 'corrected') %>%
+  unnest(value) %>%
+  dplyr::select(-time_model, -data)
+```
+
+## Combine outputs & plot
+
+```{r}
+time_or_daily_basis = rbind(time_or_daily_basis_brm, time_or_week_risk)
+
+
+time_or_daily_basis =  time_or_daily_basis %>%
+  mutate(term = dplyr::recode(term,
+                              'weekend'='Weekend > Week Days',
+                              'summerbreak1'='Summer Break > School Year',
+                              'month_num_center'='+1 Month Since Baseline'),
+         name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+or_plot = time_or_daily_basis %>%
+  dplyr::filter(corrected == 'or_corrected') %>%
+  dplyr::filter(! term %in% c('Intercept', 'sd__(Intercept)')) %>%
+  ggplot(data = ., aes(x = term, y = estimate, color=name)) +
+  geom_point(position = position_dodge(0.2)) + 
+  geom_errorbar(data = dplyr::filter(time_or_daily_basis,
+                                     corrected == 'or_uncorrected',
+                                     !term %in% c('Intercept', 'sd__(Intercept)')),
+                                     aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2),
+                lwd = 1) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  coord_flip() +
+  scale_y_log10() +
+  labs(y = 'Association with missingness\nAdjusted Odds Ratio',
+       x = NULL, color = NULL) +
+  scale_color_manual(values = pal2) +
+  theme(legend.position = 'none')
+
+
+or_plot_sobp = time_or_daily_basis %>%
+  dplyr::filter(! term %in% c('(Intercept)', 'sd__(Intercept)')) %>%
+  mutate(term = dplyr::recode(term,
+                              'weekend'='Weekend > Week Days',
+                              'summerbreak1'='Summer Break > School Year',
+                              'month_num_center'='+1 Month Since Baseline'),
+         name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey')) %>%
+  ggplot(data = ., aes(x = term, y = estimate, color=name)) +
+  geom_point(position = position_dodge(0.2), size = 3) + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2), lwd = 1) +
+  geom_hline(yintercept = 1, lty = 2) +
+  coord_flip() +
+  scale_y_log10() +
+  labs(y = 'Association with missingness\nAdjusted Odds Ratio',
+       x = NULL, color = NULL) +
+  scale_color_manual(values = pal) +
+   theme(text = element_text(face = 'bold', size = 20),
+         legend.position = 'bottom') +
+  guides(color=guide_legend(nrow=2,byrow=TRUE)) +
+  theme(axis.text.y = element_text(angle = 30, vjust = 0.5, hjust=1))
+
+```
+
+```{r}
+time_or_table = time_or_daily_basis %>%
+  dplyr::filter(term != 'Intercept') %>%
+  dplyr::select(-Est.Error) %>%
+  pivot_wider(id_cols = c('name', 'estimate', 'term'), values_from = c('conf.low', 'conf.high'), 
+              names_from = corrected) %>%
+   mutate(`95% CI`=paste0('[', format(round(conf.low_or_uncorrected, digits = 3), nsmall=3), ', ', format(round(conf.high_or_uncorrected, digits = 3), nsmall=3), ']'),
+           `98.33% CI`=paste0('[', format(round(conf.low_or_corrected, digits = 3), nsmall=3), ', ', format(round(conf.high_or_corrected, digits = 3), nsmall=3), ']'),
+           Significance = case_when(
+              conf.low_or_corrected > 1 & conf.high_or_corrected > 1 ~ '#',
+              conf.low_or_corrected < 1 & conf.high_or_corrected < 1 ~ '#',
+              conf.low_or_uncorrected < 1 & conf.high_or_uncorrected < 1 ~ '+',
+              conf.low_or_uncorrected > 1 & conf.high_or_uncorrected > 1 ~ '+')) %>%
+  dplyr::select('Contrast'=term, 'Missing Data Modality'=name, `Adjusted Odds Ratio`=estimate, 
+                `95% CI`, `98.33% CI`, Significance) %>%
+  dplyr::arrange(Contrast, `Missing Data Modality`) %>%
+  mutate(`Adjusted Odds Ratio` = format(round(`Adjusted Odds Ratio`, digits = 3), nsmall=3))
+
+time_or_table[is.na(time_or_table)] = ''
+
+write.csv(time_or_table, row.names = FALSE, file = '../../tables/supplement/design_features_or_table.csv')
+```
+
+
+# 2. Plot raw proportions of missing data over time
+
+```{r}
+# for calculating weekly rolling averages of missingness
+rolling_proportion_missing = function(df,day_num_select, days_back, variable){
+  df_filtered = dplyr::filter(df, 
+                              day_num <= day_num_select, 
+                              day_num > day_num_select - days_back)
+  
+  missing_subset <- df_filtered[, paste0(variable)]
+  
+  denominator = nrow(df_filtered)
+  numerator = sum(missing_subset)
+  
+  proportion_missing = numerator/denominator
+  return(proportion_missing)
+}
+
+
+
+rolling_df = data.frame(day_num = 1:180, missing_daily = rep(NA, 180),
+                        missing_keyboard = rep(NA, 180),
+                        missing_accel = rep(NA, 180),
+                        missing_gps = rep(NA, 180))
+
+for (i in 1:nrow(rolling_df)){
+  rolling_df$missing_daily[i] = rolling_proportion_missing(df =daily, day_num_select = i, days_back = 7, variable = 'missing_daily')
+  rolling_df$missing_keyboard[i] = rolling_proportion_missing(df =daily, day_num_select = i, days_back = 7, variable = 'missing_keyboard')
+  rolling_df$missing_accel[i] = rolling_proportion_missing(df =daily, day_num_select = i, days_back = 7, variable = 'missing_accel')
+  rolling_df$missing_gps[i] = rolling_proportion_missing(df =daily, day_num_select = i, days_back = 7, variable = 'missing_gps')
+}
+
+# # of participants
+n_p = length(unique(daily$ID))
+
+daily_day_num_proportions = rolling_df %>%
+  pivot_longer(contains('missing')) %>%
+  group_by(day_num, name) %>% 
+  summarise(p = value,
+            se = sqrt(p*(1-p)/n_p),
+            lwr = p - 2*se, 
+            upr = p + 2*se) %>%
+  mutate(name = dplyr::recode(name, 'missing_daily'='Daily Mood Survey',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_accel'='Accelerometer'), 
+         week_num = day_num / 7) %>%
+  dplyr::filter(!(day_num <=7  & name == 'Accelerometer'),
+                day_num < 180)
+
+risk_week_num_proportions = risk_week_present %>%
+  dplyr::select(ID, week_num, risk_missing) %>%
+  group_by(week_num) %>% 
+  summarise(p = sum(risk_missing)/n(),
+            se = sqrt(p*(1-p)/n()),
+            lwr = p - 2*se, 
+            upr = p + 2*se) %>%
+  mutate(name = 'Weekly SI Survey', 
+         week_num = week_num - 1,
+         day_num = week_num*7)
+
+daily_day_num_proportions = rbind(daily_day_num_proportions, risk_week_num_proportions)
+
+
+time_starts = dplyr::filter(daily_day_num_proportions, week_num ==1 | (week_num == 2 & name == 'Accelerometer')) %>%
+  group_by(name) %>%
+  summarise(p = mean(p), week_num = 0)
+
+time_ends = dplyr::filter(daily_day_num_proportions, week_num ==24) %>%
+  group_by(name) %>%
+  summarise(p = mean(p), week_num =25)
+
+timeplt = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
+  geom_hline(yintercept = 0.5, lty = 2) +
+  geom_line(aes(color = name), lwd = 1) +
+  labs(y = 'P(Missing)', x = "Weeks since baseline (person-weeks)\n", color= NULL) +
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25)) +
+  theme(legend.position = 'right') +
+  geom_label_repel(
+    aes(label = format(round(p,2), nsmall=2), color = name), data = time_starts,
+    fontface ="plain",  size = 3, direction = 'both', point.padding = 1, show.legend =FALSE) +
+  geom_label_repel(
+    aes(label = format(round(p,2), nsmall=2), color = name), data = time_ends,
+    fontface ="plain",  size = 3, direction = 'both', show.legend =FALSE) +
+  scale_color_manual(values = pal2)
+
+timeplt_sobp = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
+  geom_hline(yintercept = 0.5, lty = 2) +
+  geom_line(aes(color = name)) +
+  labs(y = 'P(Missing)', x = "Weeks since baseline (person-weeks)\n", color= NULL) +
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25)) +
+  theme(legend.position = 'right',
+        text = element_text(face = 'bold', size = 13)) +
+  geom_label_repel(
+    aes(label = round(p,2), color = name), data = time_starts,
+    fontface ="plain",  size = 3, direction = 'both', point.padding = 1, show.legend =FALSE) +
+  geom_label_repel(
+    aes(label = round(p,2), color = name), data = time_ends,
+    fontface ="plain",  size = 3, direction = 'both', show.legend =FALSE) +
+  scale_color_manual(values = pal2)
+```
+
+
+## Daily Mood Month & Weekday Models
+```{r}
+daily = mutate(daily, weds = dayofweek=='Wednesday')
+
+# exclude weekends here to comapre wednesday to other weekdays
+m_weds_daily = brms::brm(data = dplyr::filter(daily, weekend == '0'), missing_daily ~  summerbreak + weds + personal_time_z + (weds |ID), 
+                         family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+```
+
+Daily model summaries/output
+
+```{r}
+m_weds_daily %>% emmeans::emmeans(specs = 'weds', type = 'response') %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+
+m_week_month = brms::brm(data = daily, missing_daily ~ dayofweek + factor(month) + personal_time_z + (1 |ID), 
+                           family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_week_month_keyboard = brms::brm(data = daily, missing_keyboard ~ dayofweek + factor(month) + personal_time_z + (1 |ID), 
+                           family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_week_month_accel = brms::brm(data = daily, missing_accel ~ dayofweek + factor(month) + personal_time_z + (1 |ID), 
+                           family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+
+summary(m_week_month_keyboard_t)
+save(m_weds_daily, m_week_month, m_week_month_keyboard, m_week_month_accel, file = 'model_outputs/day_of_week_month_models.rda')
+```
+
+
+
+```{r}
+month_daily = emmeans::emmeans(m_week_month, specs = 'month', type = 'response',
+                               at = list(personal_time_z = -1, dayofweek = 'Tuesday')) %>%
+  data.frame(type = 'Daily Mood')
+
+month_keyboard = emmeans::emmeans(m_week_month_keyboard, specs = 'month', type = 'response',
+                                  at = list(personal_time_z = -1, dayofweek = 'Tuesday')) %>%
+  data.frame(type = 'Keyboard Input')
+
+month_accel= emmeans::emmeans(m_week_month_accel, specs = 'month', type = 'response',
+                                  at = list(personal_time_z = -1, dayofweek = 'Tuesday')) %>%
+  data.frame(type = 'Accelerometer')
+
+week_daily = emmeans::emmeans(m_week_month, specs = 'dayofweek', type = 'response') %>%
+  data.frame() %>%
+  mutate(type = 'Daily Mood')
+
+week_keyboard = emmeans::emmeans(m_week_month_keyboard, specs = 'dayofweek', type = 'response') %>%
+  data.frame() %>%
+  mutate(type = 'Daily Mood')
+
+weekplt = week_daily %>%
+  dplyr::filter(type == 'Daily Mood') %>%
+  ggplot(data = ., aes(x = dayofweek, y = response)) +
+  geom_point(color = pal2[2], size = 3) +  
+  geom_vline(xintercept = 'Wednesday', lty = 2, color = 'red', alpha = 0.5) +
+  geom_hline(yintercept = 0.5, lty = 2) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD), width = 0, color = pal2[2], lwd = 1) +
+  scale_x_discrete(limits = c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')) +
+  labs(x = 'Day of Week', y  = 'P(Missing Daily Mood)', color = NULL) +
+  annotate(geom = 'label', 
+            label = 'Suicide Ideation Prompt\nDelivered 9am Weds',
+            color = 'black',
+            x = 'Wednesday', y = .65)
+
+ monthplt = month_daily %>%
+  rbind(., month_keyboard, month_accel) %>%
+  ggplot(data = ., aes(x = month, y = response)) +
+  geom_point(aes(color = type), position = position_dodge(0.3), size =3) +
+  geom_hline(yintercept = 0.5, lty = 2) + 
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD, color = type), width = 0, position = position_dodge(0.3)) +
+  scale_x_discrete(limits = c('Jan', 'Feb', 'Mar', 'April', 'May', 'June', 'July', 'August', 'Sept','Oct', 'Nov', 'Dec')) +
+  labs(x = 'Month', y  = 'P(Missing)', color = NULL)  +
+  scale_color_manual(values = pal2[c(1,2,4)]) +
+  theme(legend.position = 'none') +
+  annotate(geom = 'label', 
+            label = 'Accelerometer',
+            color = pal2[1],
+            x = 'Mar', y = .65) +
+  annotate(geom = 'label', 
+            label = 'Daily Mood Survey',
+            color = pal2[2],
+            x = 'Mar', y = .7) +
+  annotate(geom = 'label', 
+            label = 'Keyboard Input',
+            color = pal2[4],
+            x = 'Mar', y = .75)
+
+```
+
+# 4. Make plot grids
+
+```{r}
+top_row =  cowplot::plot_grid(timeplt, or_plot, labels = c('A', 'B'), rel_widths = c(1.6, 1))
+bottom_row = cowplot::plot_grid(weekplt, monthplt, labels = c('C', 'D'))
+
+
+design_grid = cowplot::plot_grid(top_row, bottom_row, nrow = 2)
+
+cowplot::save_plot(design_grid, filename = '../../figures/fig3.1_design_features_daily_missingness.png', base_width = 10, base_height = 7)
+
+
+top_row_sobp =  cowplot::plot_grid(timeplt_sobp, or_plot_sobp, labels = c('A', 'B'), rel_widths = c(1.5, 1))
+
+
+cowplot::save_plot(top_row_sobp, filename = '../../figures/sobp/design_features.png', base_width = 12, base_height = 4)
+
+ggsave(or_plot_sobp, filename = '../../figures/sobp/design_features.png', height = 6, width = 9)
+```
+
+
+

@@ -1,0 +1,173 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lme4)
+library(emmeans)
+library(broom.mixed)
+library(lmerTest)
+library(brms)
+source('model_wrapper_functions.R')
+#library(ggfortify)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+theme_set(theme_bw())
+```
+
+# Load daily data
+
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+
+
+```{r}
+daily = dplyr::filter(daily, TIMEPNT==6, day_num <=200)
+```
+
+
+# Join in self-report longitudinal data
+
+```{r}
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+
+# Clinical predictors of missingness to examine longitudinally
+```{r}
+clinical_predictors_longitudinal = c('SHAPS_TOT_r', 'MFQ', 'SCARED', 'SSI19', 'INQ_burdenensomeness', 'INQ_thwartedbelonging')
+m = length(clinical_predictors_longitudinal)
+conf_level_corrected = 1- (0.05/m)
+```
+
+
+Calculate missingness in the 30-day period following baseline, 1month, and 3month visits
+```{r}
+selfreport_long_dates = selfreport_long %>%
+  pivot_wider(id_cols = ID, values_from = interview_date, names_from = month, names_prefix = 'interview_date_') %>%
+  dplyr::filter(complete.cases(.))
+
+daily = left_join(daily, selfreport_long_dates, by = 'ID')
+
+
+daily_missingness_month_summaries = daily %>%
+  group_by(ID) %>%
+  mutate(date_period_missing = case_when(
+    date >= interview_date_0 & date <= interview_date_0 + 30 & date <= interview_date_1 ~ 0,
+    date >= interview_date_1 & date <= interview_date_1 + 30 & date <= interview_date_3 ~ 1,
+    date >= interview_date_3 & date <= interview_date_3 + 30 ~ 3,
+  )) %>%
+  ungroup() %>%
+  dplyr::filter(!is.na(date_period_missing)) %>%
+  group_by(ID, date_period_missing) %>%
+  summarise(daily_missing_pct = mean(missing_daily),
+            gps_missing_pct = mean(missing_gps),
+            keyboard_missing_pct = mean(missing_keyboard),
+            accel_missing_pct = mean(missing_accel)) %>%
+  dplyr::rename(.,  month=date_period_missing) %>%
+  pivot_longer(contains('pct'), names_to = 'type', values_to = 'missing_pct') %>%
+  group_by(ID, type) %>%
+  mutate(missing_pct = scale(missing_pct, center = TRUE, scale = FALSE)) %>%
+  ungroup() %>%
+  group_by(type) %>%
+  mutate(missing_pct = scale(missing_pct, center = FALSE, scale = TRUE))
+
+
+daily_missingness_month_summaries = left_join(daily_missingness_month_summaries, selfreport_long, by = c('ID', 'month'))
+
+# pivot to very long and scale predictors
+daily_missingness_month_summaries_long = pivot_longer(daily_missingness_month_summaries, all_of(clinical_predictors_longitudinal),
+                                                      names_to = 'clinical_predictor') %>%
+  group_by(ID, clinical_predictor, type) %>%
+  mutate(value = scale(value, center = TRUE, scale = FALSE)) %>%
+  ungroup() %>%
+  group_by(clinical_predictor, type, value = scale(value, center = FALSE, scale = TRUE)) %>%
+  ungroup()
+```
+
+
+# Run models & save outputs
+
+Within-participant changes in clinical acuity (`value`) used as predictors of changes in % missingness over the next 30 days
+```{r}
+models_clinical_predict_month_missingness = daily_missingness_month_summaries_long %>%
+  group_by(clinical_predictor, type) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., missing_pct ~ value + month + (value|ID), prior = beta_prior,
+                                             cores = 4, chains = 4, iter = 4000, seed = 11291993)),
+         coef = purrr::map(model, ~broom::tidy(.)))
+  
+
+
+coef_clinical_predict_month_missingness = models_clinical_predict_month_missingness %>%
+  unnest(coef) %>%
+  dplyr::select(-data, -model)
+
+save(models_clinical_predict_month_missingness, coef_clinical_predict_month_missingness, file = 'model_outputs/clinical_predict_month_missingness.rda')
+
+
+load('model_outputs/clinical_predict_month_missingness.rda')
+```
+
+```{r}
+coef_clinical_predict_month_missingness_corrected = models_clinical_predict_month_missingness %>%
+  mutate(coef = purrr::map(model, ~broom::tidy(., conf.level = conf_level_corrected))) %>%
+  unnest(coef) %>%
+  dplyr::select(type, clinical_predictor, term, conf.low_corrected=conf.low, conf.high_corrected = conf.high)
+
+
+coef_clinical_predict_month_missingness = left_join(coef_clinical_predict_month_missingness, coef_clinical_predict_month_missingness_corrected,
+                                                by = c('type', 'clinical_predictor', 'term')) 
+
+
+coef_clinical_predict_month_missingness = mutate(coef_clinical_predict_month_missingness, 
+                                             clinical_predictor = dplyr::recode(clinical_predictor, 
+                                                                                'MFQ'='Depression Symptoms (MFQ)',
+                                                                                'SHAPS_TOT_r'='Anhedonia Symptoms (SHAPS)',
+                                                                                'SCARED'='Anxiety Symptoms (SCARED)', 
+                                                                                'SSI19'='Suicidal Ideation Severity (SSI)',
+                                                                                'INQ_burdenensomeness'='Percieved Burdensomeness (INQ)', 
+                                                                                'INQ_thwartedbelonging'='Thwarted Belonging (INQ)'),
+                                             type = dplyr::recode(type,
+                                                                  'accel_missing_pct'='Accelerometer',
+                                                                  'gps_missing_pct'='GPS',
+                                                                  'daily_missing_pct'='Daily Mood Survey',
+                                                                  'keyboard_missing_pct'='Keyboard Input')) %>%
+  ungroup() %>%
+  mutate(sig_star = case_when(
+    conf.high*conf.low >= 0 & conf.high_corrected*conf.low_corrected <= 0 ~ '+',
+    conf.high*conf.low <= 0 ~ '',
+    conf.high_corrected*conf.low_corrected > 0 ~ '#'
+  ))
+
+pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+
+clinical_predict_month_missingness_plot = coef_clinical_predict_month_missingness %>%
+  dplyr::filter(term == 'value') %>%
+  ggplot(aes(x = clinical_predictor, y = estimate, color = type)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_point(position = position_dodge(0.3)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0,
+                position = position_dodge(0.3), lwd = 1) +
+  geom_errorbar(aes(ymin = conf.low_corrected, ymax = conf.high_corrected), width = 0,
+                position = position_dodge(0.3)) +
+  geom_text(aes(y = conf.high_corrected*1.1, label = sig_star, group = type, color = type),
+                position = position_dodge(0.3), show.legend = FALSE) + 
+  coord_flip() +
+  scale_color_manual(values = pal2) +
+  labs(x = 'Within-Person Predictor', y = 'Association with % missing over next 30 days\nStandardized Regression Beta Coefficient', color = 'Missing Data Modality')
+
+
+ggsave(clinical_predict_month_missingness_plot, file = '../../figures/supplement/clinical_predict_month_missingness.png',
+       width = 6, height = 6)
+
+```

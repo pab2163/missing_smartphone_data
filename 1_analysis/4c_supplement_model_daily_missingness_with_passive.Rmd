@@ -1,0 +1,225 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+library(DescTools)
+options(buildtools.check = function(action) TRUE)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+theme_set(theme_bw())
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+sleep = read_csv('../../cleaned_data/daily_sleep_jackie_cleaning.csv') %>%
+  dplyr::select(-`...1`,date = dt_feature, -daily)
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+## Prepare data for models 
+
+Median scale passive variables
+```{r}
+median_scale = function(x, remove_na){
+  median_scale_x = x - median(x, na.rm=remove_na)
+  return(median_scale_x)
+}
+
+daily = left_join(daily, mutate(sleep, ID = as.character(ID)), by = c('ID', 'date')) 
+
+# clean keyboard features
+daily = daily %>%
+  mutate(prop_word_pos_day = DescTools::Winsorize(prop_word_pos_day, na.rm = TRUE),
+         prop_word_neg_day = DescTools::Winsorize(prop_word_neg_day, na.rm = TRUE),
+         n_char_day = DescTools::Winsorize(n_char_day, na.rm = TRUE)) %>%
+  group_by(ID) %>%
+  mutate(prop_word_pos_day_scale = median_scale(prop_word_pos_day, remove_na = TRUE),
+         prop_word_neg_day_scale = median_scale(prop_word_neg_day, remove_na = TRUE),
+         travel_day_hours_scale = median_scale(amt_travel_day_minutes, remove_na=TRUE)/60,
+         home_day_hours_scale = median_scale(amt_home_day_minutes, remove_na=TRUE)/60,
+         gps_capture_scale = median_scale(n_capture_day, remove_na = TRUE),
+         n_char_day_scale = median_scale(n_char_day, remove_na = TRUE)) %>%
+  ungroup() %>%
+  # grand scale
+  mutate(prop_word_neg_day_scale = scale(prop_word_neg_day_scale, center = FALSE, scale = TRUE),
+         prop_word_pos_day_scale = scale(prop_word_pos_day_scale, center = FALSE, scale = TRUE),
+         gps_capture_scale = scale(gps_capture_scale, center = FALSE, scale = TRUE),
+         n_char_day_scale = scale(n_char_day_scale, center = FALSE, scale = TRUE)) %>%
+  group_by(ID) %>%
+  mutate(prop_word_pos_day_scale_lag1 = lag(prop_word_pos_day_scale, n = 1),
+                 prop_word_neg_day_scale_lag1 = lag(prop_word_neg_day_scale, n = 1),
+                 home_day_hours_scale_lag1 =lag(home_day_hours_scale, n = 1),
+                 travel_day_hours_scale_lag1 =lag(travel_day_hours_scale, n = 1),
+                 gps_capture_scale_lag1 = lag(gps_capture_scale, n = 1),
+                 sleep_on_lag1 = lag(sleep_on, n = 1),
+                 sleep_off_lag1 = lag(sleep_off, n = 1),
+                 sleep_duration_lag1 = lag(sleep_duration, n = 1),
+                 n_char_day_scale_lag1 = lag(n_char_day_scale, n = 1),
+         missing_daily_lag1 = lag(missing_daily, n=1))
+```
+
+
+```{r}
+passive_predict_daily_missing_formula = as.formula('missing_daily ~ value + missing_daily_lag1 + weekend + summerbreak + personal_time_z + (value|ID)')
+
+
+daily_long = daily %>%
+  pivot_longer(c(prop_word_pos_day_scale,
+                 prop_word_neg_day_scale,
+                 home_day_hours_scale,
+                 travel_day_hours_scale,
+                 gps_capture_scale,
+                 sleep_on,
+                 sleep_off,
+                 sleep_duration,
+                 n_char_day_scale,
+                 prop_word_pos_day_scale_lag1,
+                 prop_word_neg_day_scale_lag1,
+                 home_day_hours_scale_lag1,
+                 travel_day_hours_scale_lag1,
+                 gps_capture_scale_lag1,
+                 sleep_on_lag1,
+                 sleep_off_lag1,
+                 sleep_duration_lag1,
+                 n_char_day_scale_lag1))
+
+
+num_predictors = 9
+conf_level = 1-(.05/num_predictors)
+```
+
+## Fit models (continuous)
+```{r}
+passive_predict_daily_missing_models_wlag = daily_long %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = passive_predict_daily_missing_formula,
+                                        family = bernoulli(link = 'logit'),
+                                        chains = 4, cores = 4, iter = 2000, seed = 11291993, prior = beta_prior)))
+
+save(passive_predict_daily_missing_models_wlag, file = 'model_outputs/passive_predict_daily_missingness_brm_wlag.rda')
+```
+
+## Extract Odds Ratios from Models
+
+```{r}
+passive_predict_daily_missing_or_uncorrected = passive_predict_daily_missing_models_wlag %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
+                                                  at = list('value'=c(0,1))) %>%
+                           pairs(reverse = TRUE) %>%
+                           confint(level = 0.95) %>%
+                           data.frame())) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model)
+
+passive_predict_daily_missing_or_corrected= passive_predict_daily_missing_models_wlag %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
+                                                  at = list('value'=c(0,1))) %>%
+                           pairs(reverse = TRUE) %>%
+                           confint(level = conf_level) %>%
+                           data.frame())) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model)
+
+passive_predict_daily_missing_or_corrected  = passive_predict_daily_missing_or_corrected %>%
+  mutate(lag = ifelse(grepl('lag1', name), '1 Day Prior', 'Same Day'),
+         name = gsub("_lag1","",name),
+                  grouping = case_when(
+           grepl('word',name)  ~ 'Keyboard Input',
+           grepl('char', name) ~ 'Keyboard Input',
+           grepl('sleep', name) ~ 'Sleep',
+           grepl('hours', name) ~ 'GPS',
+           grepl('gps', name) ~ 'GPS',
+         ),
+         name_recode = dplyr::recode(name,
+                              'travel_day_hours_scale'='Hours Traveling\n+1 Hour',
+                              'sleep_on'='Bedtime\n+1 Hour',
+                              'sleep_off'='Wake Time\n+1 Hour',
+                              'sleep_duration'='Sleep Duration\n+1 Hour',
+                              'prop_word_pos_day_scale'='% Positive Words\n+1SD',
+                              'prop_word_neg_day_scale'='% Negative Words\n+1SD',
+                              'n_char_day_scale'='# of characters typed\n+1SD',
+                              'home_day_hours_scale'='Hours Home\n+1 Hour',
+                              'gps_capture_scale'='# of GPS measurements\n+1SD'))
+
+
+passive_predict_daily_missing_or_uncorrected  = passive_predict_daily_missing_or_uncorrected %>%
+  mutate(lag = ifelse(grepl('lag1', name), '1 Day Prior', 'Same Day'),
+         name = gsub("_lag1","",name),
+         grouping = case_when(
+           grepl('word',name)  ~ 'Keyboard Input',
+           grepl('char', name) ~ 'Keyboard Input',
+           grepl('sleep', name) ~ 'Sleep',
+           grepl('hours', name) ~ 'GPS',
+           grepl('gps', name) ~ 'GPS',
+         ),
+         name_recode = dplyr::recode(name,
+                              'travel_day_hours_scale'='Hours Traveling\n+1 Hour',
+                              'sleep_on'='Bedtime\n+1 Hour',
+                              'sleep_off'='Wake Time\n+1 Hour',
+                              'sleep_duration'='Sleep Duration\n+1 Hour',
+                              'prop_word_pos_day_scale'='% Positive Words\n+1SD',
+                              'prop_word_neg_day_scale'='% Negative Words\n+1SD',
+                              'n_char_day_scale'='# of characters typed\n+1SD',
+                              'home_day_hours_scale'='Hours Home\n+1 Hour',
+                              'gps_capture_scale'='# of GPS measurements\n+1SD'))
+
+
+sig_frame = left_join(passive_predict_daily_missing_or_uncorrected,
+          dplyr::select(passive_predict_daily_missing_or_corrected, lower_corrected = lower.HPD, upper_corrected = upper.HPD, name, contrast, lag),
+          by = c('name', 'contrast', 'lag')) %>%
+  mutate(sig_star = case_when(
+    (lower_corrected-1)*(upper_corrected-1) > 0  ~ '#',
+    (lower_corrected-1)*(upper_corrected-1) <= 0 & (lower.HPD-1)*(upper.HPD-1) > 0 ~ '+',
+    (lower.HPD-1)*(upper.HPD-1) <= 0 ~ ''))
+
+passive_predict_daily_missing_or_plot_wlag = passive_predict_daily_missing_or_uncorrected %>%
+  ggplot(data = ., aes(x = name_recode, y = odds.ratio, color = lag)) +
+  geom_point(position = position_dodge(width=0.5), size = 2) +
+  geom_errorbar(data = passive_predict_daily_missing_or_corrected,
+                aes(ymin = lower.HPD, ymax = upper.HPD),width = 0,
+                position = position_dodge(width=0.5)) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD), width = 0, lwd = 1,
+                position = position_dodge(width=0.5)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  geom_text(data = sig_frame, aes(x = name_recode, y = upper_corrected*1.05, label = sig_star, color = lag),
+            position = position_dodge(width=0.5), show.legend = FALSE) +
+  facet_grid(rows = vars(grouping), drop=TRUE, scales = 'free', switch = 'both') +
+  scale_y_log10(breaks = c(0.5, 0.75, 1, 1.5, 2), limits = c(0.5, 1.5)) +
+  coord_flip() +
+  labs(color = 'Time window of passive sensor\nrelative to daily mood survey', x = NULL, y = 'Association with missing daily mood\nAdjusted Odds Ratio') +
+  theme(legend.position = 'bottom',
+        plot.margin = unit(c(2,3.5,1,0), "lines")) +
+  guides(color=guide_legend(nrow=2,byrow=TRUE)) +
+  scale_color_manual(values = c('cadetblue2', 'Dark Blue'))
+
+ggsave(passive_predict_daily_missing_or_plot_wlag, file = '../../figures/supplement/missing_daily_proximal_passive_wlag.png', height=8, width = 5)
+```
+
+
+

@@ -1,0 +1,275 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+options(buildtools.check = function(action) TRUE)
+```
+
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+```
+
+```{r}
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+
+# Weekly risk data
+```{r}
+load('../../cleaned_data/risk.rda')
+
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID') 
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+```
+
+
+
+```{r}
+sociodemographic_predictors = sociodemographic_predictors[!grepl('interview_date_numeric', sociodemographic_predictors)]
+
+m_formula_template_gps = as.formula(paste('missing_gps ~ scaled_predictor + personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_formula_template_accel = as.formula(paste('missing_accel ~ scaled_predictor + personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_formula_template_keyboard = as.formula(paste('missing_keyboard ~ scaled_predictor + personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_formula_template_daily = as.formula(paste('missing_daily ~ scaled_predictor + personal_time_z + weekend + summerbreak +', 
+                                            paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_formula_template_risk = as.formula(paste('risk_missing ~ scaled_predictor + personal_time_z + summerbreak +', 
+                                           paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+```
+
+## Sociodemographic models
+```{r}
+m_sociodemographic_daily = as.formula(paste('missing_daily ~ personal_time_z + weekend + summerbreak +', 
+                                            paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_sociodemographic_gps = as.formula(paste('missing_gps ~ personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_sociodemographic_accel = as.formula(paste('missing_accel ~ personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_sociodemographic_keyboard = as.formula(paste('missing_keyboard ~ personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+
+m_sociodemographic_risk = as.formula(paste('risk_missing ~ personal_time_z + summerbreak +', 
+                                           paste(sociodemographic_predictors, collapse = '+'), ' + (1 |ID)'))
+```
+
+
+# Run models & get ORs for each outcome
+
+```{r risk_models}
+risk_outputs = or_pipeline(df = risk_missing, 
+                      model_formula_template = m_formula_template_risk,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+save(risk_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_risk.rda')
+rm(risk_outputs)
+gc()
+```
+
+```{r daily_models}
+daily_outputs = or_pipeline(df = daily, 
+                      model_formula_template = m_formula_template_daily,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+save(daily_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_daily.rda')
+rm(daily_outputs)
+gc()
+```
+
+```{r gps_models}
+gps_outputs = or_pipeline(df = daily, 
+                      model_formula_template = m_formula_template_gps,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+save(gps_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_gps.rda')
+rm(gps_outputs)
+gc()
+```
+
+```{r accel_models}
+accel_outputs = or_pipeline(df = daily, 
+                      model_formula_template = m_formula_template_accel,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+# Save and clear unused memory
+save(accel_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_accel.rda')
+rm(accel_outputs)
+gc()
+```
+
+
+
+```{r keyboard_models}
+keyboard_outputs = or_pipeline(df = daily, 
+                      model_formula_template = m_formula_template_keyboard,
+                      clinical_predictors = clinical_predictors,
+                      conf_level_corrected = corrected_conf_level,
+                      bayes=TRUE)
+
+save(keyboard_outputs, file = 'model_outputs/baseline_predictors_missingness_brm_keyboard.rda')
+rm(keyboard_outputs)
+gc()
+```
+
+
+# Sociodemographic models 
+```{r}
+# Models
+gps_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_gps, df = daily)
+accel_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_accel, df = daily)
+keyboard_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_keyboard, df = daily)
+daily_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_daily, df = daily)
+risk_sociodem_model_brm = baseline_sociodemographic_model_with_missingness_brm(model_formula = m_sociodemographic_risk, df = risk_missing)
+
+# Extract OR
+daily_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(daily_sociodem_model_brm, type = 'Daily Mood Survey', 
+                                                              conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+gps_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(gps_sociodem_model_brm, type = 'GPS', 
+                                                              conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+risk_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(risk_sociodem_model_brm, type = 'Weekly SI Survey', 
+                                                              conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+keyboard_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(keyboard_sociodem_model_brm, type = 'Keyboard Input',
+                                                               conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+accel_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(accel_sociodem_model_brm, type = 'Accelerometer', 
+                                                               conf_level_corrected = corrected_conf_level,
+                                                              bayes=TRUE)
+
+# Combine
+combined_sociodem_or_brm = rbind(gps_sociodem_or_brm, accel_sociodem_or_brm, keyboard_sociodem_or_brm, daily_sociodem_or_brm, risk_sociodem_or_brm)
+
+save(gps_sociodem_model_brm, accel_sociodem_model_brm, keyboard_sociodem_model_brm, daily_sociodem_model_brm, risk_sociodem_model_brm, combined_sociodem_or_brm, file = 'model_outputs/sociodemographic_predictors_missingness_brm.rda')
+
+
+summary(daily_sociodem_model_brm)
+```
+
+
+# Models of all clinical + sociodemographic predictors together
+
+
+```{r}
+combined_predictors_model = as.formula(paste('missing ~ personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' +', paste(clinical_predictors[clinical_predictors!='SITBI_SB_ever'], collapse = '+'), ' + (1 |ID)'))
+
+combined_predictors_model_weekly = as.formula(paste('missing ~ personal_time_z + summerbreak +', 
+                                          paste(sociodemographic_predictors, collapse = '+'), ' +', paste(clinical_predictors[clinical_predictors!='SITBI_SB_ever'], collapse = '+'), ' + (1 |ID)'))
+
+daily_missing_long = daily %>%
+    pivot_longer(cols = c('missing_daily', 'missing_gps', 'missing_accel', 'missing_keyboard'), names_to = 'missing_outcome', values_to = 'missing') %>%
+    group_by(missing_outcome) 
+
+combined_predictors_model_frame = daily_missing_long %>%
+      nest() %>%
+      mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model, 
+                                                 family = bernoulli(link = 'logit'),
+                                                 cores = 4, chains = 4, iter = 10, seed = 11291993,
+                                                 prior = beta_prior)))
+
+
+combined_predictors_risk_model_frame = risk_missing %>%
+  pivot_longer(cols = c('risk_missing'), names_to = 'missing_outcome', values_to = 'missing') %>%
+  group_by(missing_outcome) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model_weekly, 
+                                                 family = bernoulli(link = 'logit'),
+                                                 cores = 4, chains = 4, iter = 10, seed = 11291993,
+                                                 prior = beta_prior)))
+
+
+combined_predictors_or_frame_risk = pull_separate_model_odds_ratios(model_df = combined_predictors_risk_model_frame, 
+                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
+
+combined_predictors_or_frame = pull_separate_model_odds_ratios(model_df = combined_predictors_model_frame, 
+                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
+
+combined_predictors_or_frame = rbind(combined_predictors_or_frame, combined_predictors_or_frame_risk)
+
+combined_predictors_or_frame_sociodem = dplyr::rename(combined_predictors_or_frame, 'type'='missing_outcome', 'correction'='or_type') %>%
+  dplyr::filter(term %in% sociodemographic_predictors) %>%
+  mutate(type = dplyr::recode(type, 
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey',
+                              'risk_missing'='Weekly SI Survey'))
+
+combined_predictors_or_frame = dplyr::rename(combined_predictors_or_frame, 'name'='term', 'type'='missing_outcome') %>%
+  mutate(term = 'scaled_predictor') %>%
+  dplyr::filter(name %in% clinical_predictors) %>%
+  mutate(type = dplyr::recode(type, 
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey',
+                              'risk_missing'='Weekly SI Survey'))
+
+
+
+clinical_or_mlm_bayes_combined = baseline_predictors_missingness_or_plot(or_df = combined_predictors_or_frame, m = m, bayes = TRUE)
+sociodem_plot_bayes_combined = make_sociodem_or_plot(sociodem_or_df = combined_predictors_or_frame_sociodem, m = m, bayes = TRUE)
+
+sfig_odds_ratio_bayes_baseline_combined = cowplot::plot_grid(clinical_or_mlm_bayes_combined, sociodem_plot_bayes_combined, ncol = 1, align = 'v', axis = 'lr',
+                   labels = c('A', 'B'), rel_heights = c(1.5, 1))
+```

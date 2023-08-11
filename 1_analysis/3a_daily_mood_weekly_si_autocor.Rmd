@@ -1,0 +1,361 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+options(buildtools.check = function(action) TRUE)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+```
+
+
+# 1. Daily Mood
+
+## Generate daily variables
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+
+daily = daily %>%
+  group_by(ID) %>%
+  mutate(daily_within = daily- median(daily, na.rm = TRUE),
+              daily_lag1 = lag(daily_within, n=1),
+              daily_lag2 = lag(daily_within, n=2),
+              daily_lag3 = lag(daily_within, n=3),
+              daily_lag4 = lag(daily_within, n=4),
+              daily_lag5 = lag(daily_within, n=5),
+              daily_lag6 = lag(daily_within, n=6),
+              daily_lag7 = lag(daily_within, n=7),
+              daily_lead1 = lead(daily_within, n=1),
+              daily_lead2 = lead(daily_within, n=2),
+              daily_lead3 = lead(daily_within, n=3),
+              daily_lead4 = lead(daily_within, n=4),
+              daily_lead5 = lead(daily_within, n=5),
+              daily_lead6 = lead(daily_within, n=6),
+              daily_lead7 = lead(daily_within, n=7),
+              missing_daily_lag1 = lag(missing_daily, n=1)) %>%
+  ungroup() %>%
+  rowwise() %>%
+  mutate(daily_last_week = mean(c(daily_lag1, daily_lag2, daily_lag3, daily_lag4, daily_lag5, daily_lag6, daily_lag7), na.rm=TRUE),
+         daily_next_week = mean(c(daily_lead1, daily_lead2, daily_lead3, daily_lead4, daily_lead5, daily_lead6, daily_lead7), na.rm=TRUE)) %>%
+  ungroup()
+
+
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+##  Does yesterday's or last week's (average) observed daily mood predict today's daily missingness?
+
+```{r}
+m_daily_lag1_predict_missing_daily = daily %>%
+  brms::brm(data = ., missing_daily ~ daily_lag1 + personal_time_z + weekend + summerbreak + (daily_lag1 |ID),
+                                  family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_daily_lagweek_predict_missing_daily = daily %>%
+  brms::brm(data = ., missing_daily ~ daily_last_week + personal_time_z + weekend + summerbreak + (daily_last_week |ID),
+                                  family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+```
+
+```{r}
+# get standard deviation for calculation of odds ratios
+daily_sd = sd(daily$daily_within, na.rm = TRUE)
+
+emmeans::emmeans(m_daily_lag1_predict_missing_daily, specs = 'daily_lag1', type = 'response', at = list(daily_lag1 = c(0, daily_sd))) %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+
+
+emmeans::emmeans(m_daily_lagweek_predict_missing_daily, specs = 'daily_last_week', type = 'response', 
+                 at = list(daily_last_week = c(0, daily_sd))) %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+```
+
+## Autocorrelation of daily mood & daily mood missingness
+
+```{r}
+m_daily_missing_autocor = daily %>%
+  brms::brm(data = ., missing_daily ~ missing_daily_lag1 + scale(personal_time_z) + weekend + summerbreak + (missing_daily_lag1 |ID),
+                                  family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_daily_autocor = daily %>%
+  brms::brm(data = ., scale(daily_within) ~ scale(daily_lag1) + scale(personal_time_z) + weekend + summerbreak + (scale(daily_lag1) |ID),
+            chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+summary(m_daily_missing_autocor)
+summary(m_daily_autocor)
+
+broom.mixed::tidy(m_daily_autocor, conf.int = TRUE)
+
+emmeans::emmeans(m_daily_missing_autocor, specs = 'missing_daily_lag1', type = 'response') %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+```
+
+## Does missing daily mood today predict daily mood value tomorrow?
+
+```{r}
+m_missing_daily_lag1_predict_daily = daily %>%
+  brms::brm(data = ., daily_within ~  missing_daily_lag1 + personal_time_z + weekend + summerbreak + (missing_daily_lag1 |ID),
+            chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+
+broom.mixed::tidy(m_missing_daily_lag1_predict_daily, conf.int = TRUE)
+
+save(m_daily_autocor, m_daily_missing_autocor,
+     m_missing_daily_lag1_predict_daily, 
+     m_daily_lag1_predict_missing_daily, 
+     m_daily_lagweek_predict_missing_daily, file = 'model_outputs/daily_autocor_models.rda')
+```
+
+# 2. Weekly Suicidal Ideation Surveys
+
+
+## Get data ready for models
+
+```{r}
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup()
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+
+
+risk_weekly_summary = dplyr::filter(risk_weekly, !is.na(riskOne)) %>%
+  dplyr::select(ID, week, riskOne) %>%
+  ungroup() %>%
+  group_by(ID, week) %>%
+  summarise(riskOne = max(riskOne))
+
+risk_weekly_summary$riskOne <- recode(risk_weekly_summary$riskOne,"never"=1,"rarely"=2,"sometimes"=3, "often"=4, "allTheTime"=5)
+
+risk_weekly_summary = risk_weekly_summary  %>%
+  group_by(ID) %>%
+  mutate(si_within = riskOne - mean(riskOne, na.rm = TRUE),
+         si_bin = riskOne >= 4) %>%
+  ungroup()
+
+
+risk_missing = left_join(risk_missing, risk_weekly_summary, by = c('ID', 'week'))
+
+risk_missing = risk_missing %>%
+  group_by(ID) %>%
+  mutate(risk_missing_lag1 = lag(risk_missing, n = 1),
+         si_within_lag1 = lag(si_within, n=1),
+         si_bin_lag1 = lag(si_bin, n = 1),
+         si_between = mean(riskOne, na.rm = TRUE)) %>%
+  ungroup()
+
+```
+
+##  Does last week's si predict this week's si survey missingness?
+
+```{r}
+m_si_lag1_predict_missing_si = risk_missing %>%
+  brms::brm(data = ., risk_missing ~ si_within_lag1 + si_between  + personal_time_z + summerbreak + (si_within_lag1 |ID),
+        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_si_bin_lag1_predict_missing_si = risk_missing %>%
+  brms::brm(data = ., risk_missing ~ si_bin_lag1  + personal_time_z + summerbreak + (si_bin_lag1 |ID),
+            family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+summary(m_si_lag1_predict_missing_si)
+summary(m_si_bin_lag1_predict_missing_si)
+
+
+emmeans::emmeans(m_si_lag1_predict_missing_si, specs = 'si_within_lag1', type = 'response', at = list(si_within_lag1 = c(0, 1))) %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+
+```
+
+# Autocorrelation of SI and SI missingness
+
+```{r}
+m_si_missing_autocor = risk_missing %>%
+  brms::brm(data = ., risk_missing ~ risk_missing_lag1  + personal_time_z + summerbreak + (risk_missing_lag1 |ID),
+        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_si_autocor = risk_missing %>%
+  dplyr::filter(!is.na(si_within), !is.na(si_within_lag1)) %>%
+  brms::brm(data = ., si_within ~ si_within_lag1 + personal_time_z + summerbreak + (si_within_lag1 |ID),
+            chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+
+summary(m_si_autocor)
+summary(m_si_missing_autocor)
+
+emmeans::emmeans(m_si_missing_autocor, specs = 'risk_missing_lag1', type = 'response') %>%
+  pairs(reverse=TRUE) %>%
+  confint()
+
+
+broom.mixed::tidy(m_si_autocor, conf.int=TRUE)
+```
+
+
+# Does missing SI one week predict higher SI the next?
+
+
+```{r}
+m_missing_si_lag1_predict_si = risk_missing %>%
+  brms::brm(data = ., si_within ~  risk_missing_lag1 + personal_time_z + summerbreak + (risk_missing_lag1 |ID),
+        chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+m_missing_si_bin_lag1_predict_si = risk_missing %>%
+  brms::brm(data = ., si_bin ~  risk_missing_lag1 + personal_time_z + summerbreak + (risk_missing_lag1 |ID),
+        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+options(scipen = 999)
+broom.mixed::tidy(m_missing_si_lag1_predict_si, conf.int = TRUE)
+
+summary(m_missing_si_bin_lag1_predict_si)
+
+
+```
+
+
+```{r}
+save(m_missing_si_bin_lag1_predict_si, m_missing_si_lag1_predict_si,
+     m_si_autocor, m_si_missing_autocor,
+     m_si_bin_lag1_predict_missing_si, m_si_lag1_predict_missing_si, 
+     file = 'model_outputs/si_autocor_models.rda')
+```
+
+# Make daily mood plots
+```{r}
+load('model_outputs/daily_autocor_models.rda')
+
+
+cond_fx_daily_lag1_predict_missing_daily = conditional_effects(m_daily_lag1_predict_missing_daily)[[1]]  %>%
+  ggplot(data = ., aes(x = daily_lag1, y = estimate__)) +
+    geom_line(lwd = 2) +
+    geom_ribbon(aes(ymin = lower__, ymax = upper__), alpha = 0.3) +
+    labs(x = 'Daily Mood 1 Day Prior\nRelative to Participant Mean',
+         y = 'P(Missing Daily Mood)') +
+  theme_bw() +
+  xlim(-50, 50)
+
+
+cond_fx_daily_lagweek_predict_missing_daily = conditional_effects(m_daily_lagweek_predict_missing_daily)[[1]] %>%
+  ggplot(data = ., aes(x = daily_last_week, y = estimate__)) +
+    geom_line(lwd = 2) +
+    geom_ribbon(aes(ymin = lower__, ymax = upper__), alpha = 0.3) +
+    labs(x = 'Average Daily Mood Over Past Week\nRelative to Participant Mean',
+         y = 'P(Missing Daily Mood)') +
+  theme_bw() +
+  xlim(-50, 50)
+  
+  
+cond_fx_m_daily_missing_autocor = conditional_effects(m_daily_missing_autocor)[[1]] %>%
+  dplyr::filter(missing_daily_lag1 %in% c(0, 1)) %>%
+  mutate(missing_daily_lag1 = dplyr::recode(missing_daily_lag1, '1'='Missing', '0'='Observed')) %>%
+  ggplot(data = ., aes(x = missing_daily_lag1, y = estimate__)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = lower__, ymax = upper__), width = 0) + 
+    theme_bw() +
+    labs(x = 'Daily Mood Missingness 1 Day Prior',
+         y = 'P(Missing Daily Mood)') 
+
+
+cond_fx_m_daily_missing_predict_daily = conditional_effects(m_missing_daily_lag1_predict_daily,
+                    conditions = data.frame(summerbreak=1, weekend = 0.1))[[1]] %>%
+  dplyr::filter(missing_daily_lag1 %in% c(0, 1)) %>%
+  mutate(missing_daily_lag1 = dplyr::recode(missing_daily_lag1, '1'='Missing', '0'='Observed')) %>%
+  ggplot(data = ., aes(x = missing_daily_lag1, y = estimate__)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = lower__, ymax = upper__), width = 0) + 
+    theme_bw() +
+    labs(x = 'Daily Mood Missingness 1 Day Prior',
+         y = 'Daily Mood\nRelative to Participant Mean') 
+
+
+daily_autocor_grid = cowplot::plot_grid(cond_fx_daily_lag1_predict_missing_daily, 
+                   cond_fx_daily_lagweek_predict_missing_daily, 
+                   cond_fx_m_daily_missing_autocor, cond_fx_m_daily_missing_predict_daily,
+                   labels = c('A', 'B', 'C', 'D'))
+
+
+cowplot::save_plot(daily_autocor_grid, file = '../../figures/supplement/daily_autocor_cond_fx.png', 
+                   base_height = 8, base_width = 8)
+
+```
+
+# Make weekly suicidal ideation plots
+
+```{r}
+load('model_outputs/si_autocor_models.rda')
+
+
+si_predict_missing_plt = conditional_effects(m_si_lag1_predict_missing_si)[[1]] %>%
+  ggplot(data = ., aes(x = si_within_lag1, y = estimate__)) +
+  geom_line(lwd = 2) +
+    geom_ribbon(aes(ymin = lower__, ymax = upper__), alpha = 0.3) +
+    labs(x = 'Suicidal Ideation Frequency 1 Week Prior\nRelative to Participant Mean',
+         y = 'P(Missing Weekly SI Survey)') +
+    theme_bw() 
+
+missing_predict_si_plt = conditional_effects(m_missing_si_lag1_predict_si)[[1]] %>%
+  dplyr::filter(risk_missing_lag1 %in% c(0,1)) %>%
+  mutate(risk_missing_lag1 = dplyr::recode(risk_missing_lag1, '1'='Missing', '0'='Observed')) %>%
+  ggplot(data = ., aes(x = risk_missing_lag1, y = estimate__)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = lower__, ymax = upper__), width = 0) + 
+    theme_bw() +
+    labs(x = 'Weekly SI Survey Missingness 1 Week Prior',
+         y = 'Suicide Ideation Frequency\nRelative to Participant Mean') 
+
+si_autocor_plt = conditional_effects(m_si_autocor)[[1]] %>%
+  ggplot(data = ., aes(x = si_within_lag1, y = estimate__)) +
+  geom_line(lwd = 2) +
+    geom_ribbon(aes(ymin = lower__, ymax = upper__), alpha = 0.3) +
+    labs(x = 'Suicidal Ideation Frequency 1 Week Prior\nRelative to Participant Mean',
+         y = 'Suicidal Ideation Frequency\nRelative to Participant Mean') +
+    theme_bw() +
+  ylim(-2, 2.5)
+
+
+si_missing_autocor_plt = conditional_effects(m_si_missing_autocor)[[1]] %>%
+  dplyr::filter(risk_missing_lag1 %in% c(0,1)) %>%
+  mutate(risk_missing_lag1 = dplyr::recode(risk_missing_lag1, '1'='Missing', '0'='Observed')) %>%
+  ggplot(data = ., aes(x = risk_missing_lag1, y = estimate__)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = lower__, ymax = upper__), width = 0) + 
+    theme_bw() +
+    labs(x = 'Weekly SI Survey Missingness 1 Week Prior',
+         y = 'P(Missing Weekly SI Survey)') 
+
+
+si_autocor_grid = cowplot::plot_grid(si_autocor_plt, si_missing_autocor_plt, 
+                   si_predict_missing_plt, missing_predict_si_plt,
+                   labels = c('A', 'B', 'C', 'D'))
+
+cowplot::save_plot(si_autocor_grid, file = '../../figures/supplement/risk_autocor_cond_fx.png', 
+                   base_height = 8, base_width = 8)
+
+
+summary(m_si_lag1_predict_missing_si)
+```

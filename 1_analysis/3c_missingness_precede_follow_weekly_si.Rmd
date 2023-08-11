@@ -1,0 +1,643 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+theme_set(theme_bw())
+pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+options(buildtools.check = function(action) TRUE)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+```
+
+
+```{r}
+daily = daily %>%
+  group_by(ID) %>%
+  mutate(missing_daily_lag1 = lag(missing_daily, n= 1),
+         missing_gps_lag1 = lag(missing_gps, n=1),
+         missing_accel_lag1 = lag(missing_accel, n = 1),
+         missing_keyboard_lag1 = lag(missing_keyboard), n = 1,
+         daily_within = daily - median(daily, na.rm = TRUE),
+         daily_between = median(daily, na.rm = TRUE),
+         daily_within_lag1 = lag(daily_within, n = 1)) %>%
+  ungroup() %>%
+  mutate(daily_within_scaled = scale(daily_within, center = FALSE, scale = TRUE),
+         daily_between_scaled = scale(daily_between, center=FALSE, scale = TRUE),
+         daily_within_lag1_scaled = scale(daily_within_lag1, center = FALSE, scale = TRUE))
+```
+
+# 1: Weekly models -- missingness over a week predict SI?
+
+## Prepare data
+
+```{r}
+# Join daily and weekly risk data
+daily = mutate(daily, week = floor_date(date, unit = 'week',
+                           week_start = getOption("lubridate.week.start", 3)))
+
+risk_weekly$riskOne <- recode(risk_weekly$riskOne,"never"=1,"rarely"=2,"sometimes"=3, "often"=4, "allTheTime"=5)
+
+# Get max SI each week
+risk_weekly_summary = risk_weekly %>%
+  dplyr::select(ID, week, riskOne) %>%
+  ungroup() %>%
+  group_by(ID, week) %>%
+  summarise(riskOne = max(riskOne, na.rm = TRUE)) 
+
+risk_weekly_summary = risk_weekly_summary %>%
+  mutate(risk= ifelse(is.infinite(riskOne), NA_real_, riskOne)) %>%
+  group_by(ID) %>%
+  mutate(si_within = risk - mean(risk, na.rm = TRUE),
+         si_between = mean(risk, na.rm = TRUE),
+         si_bin = risk >= 4,
+         si_within_lead1 = lead(si_within, n = 1),
+         si_bin_lead1 = lead(si_bin, n = 1))
+
+# Summarize daily missingness for each week, and lag 1 week behind to get the 7 days leading up to each SI survey
+weekly_si_daily_summary = daily %>%
+  dplyr::select(ID, date, daily, daily_lag1, daily_within, daily_between, weekend, week, personal_time_z, summerbreak,
+                contains('missing')) %>%
+  left_join(., risk_weekly_summary, by = c('ID', 'week')) %>%
+  pivot_longer(c('missing_daily', 'missing_gps', 'missing_accel', 'missing_keyboard'),
+               names_to = 'name', values_to = 'missing_prop') %>%
+  group_by(name, ID, week, si_within) %>%
+  summarise(missing_prop = mean(missing_prop)*7, # mean will be # of missing days
+            summerbreak=summerbreak[1],
+            personal_time_z=personal_time_z[1]) %>%
+  ungroup() %>%
+  group_by(name, ID) %>%
+  arrange(week) %>%
+  mutate(missing_prop_lag = lag(missing_prop, n=1)) %>%
+  ungroup()
+```
+
+## Models
+
+```{r}
+models_missingness_predict_si = weekly_si_daily_summary %>% 
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., si_within ~ missing_prop_lag + summerbreak + personal_time_z + (missing_prop_lag|ID),
+                                      chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)),
+         coef = map(model, ~broom.mixed::tidy(., conf.int = TRUE))) %>% 
+  mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+models_missingness_predict_si_discrete = weekly_si_daily_summary %>% 
+  mutate(missing_prop_lag = as.character(round(missing_prop_lag))) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., si_within ~ missing_prop_lag + summerbreak + personal_time_z + (missing_prop_lag|ID),
+                                      chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)),
+         coef = map(model, ~broom.mixed::tidy(., conf.int = TRUE))) %>% 
+  mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+
+brms::prior_summary(models_missingness_predict_si$model[[1]]) 
+
+save(models_missingness_predict_si,
+     file = 'model_outputs/missingness_predict_next_week_si_brm.rda')
+
+save(models_missingness_predict_si_discrete,
+     file = 'model_outputs/missingness_predict_next_week_si_discrete_brm.rda')
+```
+
+```{r}
+load('model_outputs/missingness_predict_next_week_si_brm.rda')
+load('model_outputs/missingness_predict_next_week_si_discrete_brm.rda')
+```
+
+## Extract Coefs
+
+```{r}
+m = 4
+corrected_conf_level = 1- (0.05/m)
+
+
+missingness_predict_si_coef = models_missingness_predict_si %>%
+  unnest(coef) %>%
+  dplyr::select(-data, -model) %>%
+  mutate(corrected = 'Uncorrected')
+
+missingness_predict_si_coef_corrected = models_missingness_predict_si %>%
+  mutate(coef = map(model, ~broom.mixed::tidy(., conf.int = TRUE, conf.level = corrected_conf_level))) %>% 
+  unnest(coef) %>%
+  dplyr::select(-data, -model) %>%
+  mutate(corrected = 'Corrected')
+
+
+missingness_predict_si_coef = rbind(missingness_predict_si_coef, missingness_predict_si_coef_corrected)
+
+missingness_predict_si_model_predictions = models_missingness_predict_si %>%
+  mutate(preds = purrr::map(model, ~emmeans::emmeans(., specs = 'missing_prop_lag', weights = 'proportional',
+                                                     at = list(missing_prop_lag = seq(from = 0, to = 7, by = 1))) %>%
+           as.data.frame())) %>%
+  unnest(preds) %>%
+  dplyr::select(-model, -data)
+
+missingness_predict_si_model_predictions_discrete = models_missingness_predict_si_discrete %>%
+  mutate(preds = purrr::map(model, ~emmeans::emmeans(., specs = 'missing_prop_lag', weights = 'proportional',
+                                                     at = list(missing_prop_lag = as.character(seq(from = 0, to = 7, by = 1)))) %>%
+           as.data.frame())) %>%
+  unnest(preds) %>%
+  dplyr::select(-model, -data)
+
+```
+
+## Plots
+
+```{r}
+missingness_predict_si_coef_plot = missingness_predict_si_coef %>%
+  dplyr::filter(term == 'missing_prop_lag', corrected == 'Corrected') %>%
+  ggplot(data =., aes(x = name, y = estimate)) +
+  geom_hline(yintercept = 0, lty=2) + 
+  geom_point(aes(color = name), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high, color = name), width = 0) +
+  geom_errorbar(data =missingness_predict_si_coef %>%
+        dplyr::filter(term == 'missing_prop_lag', corrected == 'Uncorrected'), 
+        aes(ymin = conf.low, ymax = conf.high, color = name), width = 0, lwd = 2) +
+  coord_flip() + 
+  scale_color_manual(values =pal2) +
+  theme(legend.position = 'none') +
+  labs(x = NULL, y = 'Regression Beta Coefficient', title = 'A) Number of days missing data during 1 week prior as a predictor of suicidal ideation') +
+  ylim(-.025, .025) +
+  annotate(geom='text', x = 0.67, y = -0.01, label = 'More missing data-->\nless frequent SI next week', size = 4) +
+  annotate(geom='text', x = 0.67, y = 0.01, label = 'More missing data-->\nmore frequent SI next week', size = 4)
+```
+
+
+```{r}
+# coef_within_si_predict_missingness_weekly_for_plot = dplyr::filter(coef_within_si_predict_missingness_weekly,
+#                                                                    term == 'si_within') %>%
+#   mutate(sig = case_when(conf.low < 0 & conf.high < 0 ~ 1,
+#                          conf.low > 0 & conf.high > 0 ~ 1,
+#                          conf.low <= 0 & conf.high >= 0 ~ 0),
+#         name = dplyr::recode(name,
+#                               'prop_missing_accel'='Accelerometer\n% Missing Next Week',
+#                               'prop_missing_gps'='GPS\n% Missing Next Week',
+#                               'prop_missing_keyboard'='Keyboard Input\n% Missing Next Week',
+#                               'prop_missing_daily'='Daily Mood Survey\n% Missing Next Week'),
+#          plot_label = paste0('\u03B2', '=', round(estimate, 2), ', 95% CI [', round(conf.low, 2), ', ', round(conf.high, 2), ']'),
+#          plot_label = ifelse(sig ==1, paste0(plot_label, '\u002A'), plot_label))
+
+missingness_predict_si_coef_for_plot = dplyr::filter(missingness_predict_si_coef, term == 'missing_prop_lag') %>%
+  mutate(sig = case_when(conf.low < 0 & conf.high < 0 ~ 1,
+                         conf.low > 0 & conf.high > 0 ~ 1,
+                         conf.low <= 0 & conf.high >= 0 ~ 0),
+         plot_label = paste0('\u03B2', '=', round(estimate, 2), ', 95% CI [', format(round(conf.low, 2), nsmall=2), ', ', format(round(conf.high, 2),nsmall=2), ']'),
+         plot_label = ifelse(sig ==1, paste0(plot_label, '\u002A'), plot_label)) %>%
+  mutate(name = dplyr::recode(name,
+                              'Accelerometer'='Accelerometer',
+                              'GPS'='GPS',
+                              'Keyboard Input'='Keyboard Input',
+                              'Daily Mood Survey'='Daily Mood Survey'))
+
+
+
+raw_summary = weekly_si_daily_summary %>%  
+  ungroup() %>%
+  dplyr::filter(., !is.na(missing_prop_lag),
+                round(missing_prop_lag, 6) %in% round(c(0:7), 6)) %>%
+  group_by(ID, missing_prop_lag, name) %>%
+  summarise(emmean = mean(si_within, na.rm = TRUE),
+            n=n()) %>%
+  mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer\n% Missing Last Week',
+                              'missing_gps'='GPS\n% Missing Last Week',
+                              'missing_keyboard'='Keyboard Input\n% Missing Last Week',
+                              'missing_daily'='Daily Mood Survey\n% Missing Last Week')) %>%
+  mutate(missing_prop_lag = round(missing_prop_lag))
+
+missingness_predict_si_model_predictions = missingness_predict_si_model_predictions %>%
+  mutate(name = dplyr::recode(name,
+                              'Accelerometer'='Accelerometer',
+                              'GPS'='GPS',
+                              'Keyboard Input'='Keyboard Input',
+                              'Daily Mood Survey'='Daily Mood Survey'))
+
+missingness_predict_si_model_predictions_discrete = missingness_predict_si_model_predictions_discrete %>%
+  mutate(name = dplyr::recode(name,
+                              'Accelerometer'='Accelerometer',
+                              'GPS'='GPS',
+                              'Keyboard Input'='Keyboard Input',
+                              'Daily Mood Survey'='Daily Mood Survey')) %>%
+  mutate(missing_prop_lag = parse_number(as.character(missing_prop_lag)))
+
+
+missingness_predict_si_plot = ggplot(missingness_predict_si_model_predictions, aes(x = missing_prop_lag, y = emmean)) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  geom_hline(yintercept = 0.3, alpha = 0) + 
+  geom_ribbon(aes(ymin = lower.HPD, ymax = upper.HPD, fill = name), alpha = 0.3) + 
+  geom_line(lwd = 2) +
+  geom_point(data = missingness_predict_si_model_predictions_discrete, aes(color = name)) +
+  geom_errorbar(data = missingness_predict_si_model_predictions_discrete, aes(ymin = lower.HPD, ymax = upper.HPD, color = name), width = 0) + 
+  #stat_summary(data = raw_summary, fun.data = mean_cl_boot, aes(color = name), alpha = 0.8) +
+  facet_grid(~name) +
+  labs(x = 'Days Missing Data During the Week Prior',
+       y = 'Suicidal Ideation Frequency\nRelative to Within-Person Average',
+       title = 'A: Missing Data as a Within-Person Predictor of Next Week Suicidal Ideation Frequency') +
+  scale_fill_manual(values = pal2) +
+  scale_color_manual(values = pal2) +
+  theme(legend.position = 'none', panel.grid.minor = element_blank()) +
+  # geom_text(data =missingness_predict_si_coef_for_plot,
+  #          aes(label = plot_label),
+  #          x = 0, y = 0.3, hjust = 0) +
+  scale_x_continuous(breaks = 0:7)
+
+missingness_predict_si_plot_daily_gps = ggplot(missingness_predict_si_model_predictions %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey'))
+                                               , aes(x = missing_prop_lag, y = emmean)) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  geom_hline(yintercept = 0.3, alpha = 0) + 
+  geom_ribbon(aes(ymin = lower.HPD, ymax = upper.HPD, fill = name), alpha = 0.3) + 
+  geom_line(lwd = 2) +
+  geom_point(data = missingness_predict_si_model_predictions_discrete %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')), aes(color = name)) +
+  geom_errorbar(data = missingness_predict_si_model_predictions_discrete %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')), aes(ymin = lower.HPD, ymax = upper.HPD, color = name), width = 0) + 
+  facet_grid(~name) +
+  labs(x = 'Days Missing Data During the Week Prior',
+       y = 'Suicidal Ideation Frequency\nRelative to Within-Person Average',
+       title = 'A: Missing Data as a Within-Person Predictor of\nNext Week Suicidal Ideation Frequency') +
+  scale_fill_manual(values = pal2[2:3]) +
+  scale_color_manual(values = pal2[2:3]) +
+  theme(legend.position = 'none', panel.grid.minor = element_blank()) +
+  # geom_text(data =missingness_predict_si_coef_for_plot %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')),
+  #          aes(label = plot_label),
+  #          x = 0, y = 0.3, hjust = 0) +
+  scale_x_continuous(breaks = 0:7)
+```
+
+# 2: Daily Models: does SI predict missingness for the next week?
+
+## Prepare data
+```{r}
+# Only weeks with observed SI responses
+risk_weekly_summary_observed = dplyr::filter(risk_weekly, !is.na(riskOne)) %>%
+  dplyr::select(ID, week, riskOne) %>%
+  ungroup() %>%
+  group_by(ID, week) %>%
+  summarise(riskOne = max(riskOne))
+
+risk_weekly_summary_observed$riskOne <- recode(risk_weekly_summary_observed$riskOne,"never"=1,"rarely"=2,"sometimes"=3, "often"=4, "allTheTime"=5)
+
+daily_weekly_si = daily %>%
+  dplyr::select(ID, date, daily, daily_lag1, daily_within, daily_between, weekend, week, personal_time_z, summerbreak,
+                contains('missing')) %>%
+  left_join(., risk_weekly_summary_observed, by = c('ID', 'week'))
+
+
+daily_weekly_si = daily_weekly_si %>%
+  group_by(ID) %>%
+  mutate(si_within = riskOne - mean(riskOne, na.rm = TRUE),
+         si_between = mean(riskOne, na.rm = TRUE),
+         si_bin = riskOne >= 4) %>%
+  ungroup()
+
+
+daily_weekly_si_grouped_weeks = daily_weekly_si %>%
+  group_by(ID, week) %>%
+  summarize(
+         si = riskOne[1],
+         si_within = si_within[1],
+         si_between = si_between[1],
+         si_bin = si_bin[1],
+         summerbreak = summerbreak[1],
+         personal_time_z = personal_time_z[1],
+         prop_missing_daily = mean(missing_daily)*7,
+         prop_missing_accel = mean(missing_accel)*7,
+         prop_missing_gps = mean(missing_gps)*7,
+         prop_missing_keyboard = mean(missing_keyboard)*7)
+```
+
+## Models
+
+
+### Model outcomes daily (with logistic regression)
+```{r}
+models_si_predict_missingness = daily_weekly_si %>%
+  pivot_longer(c(contains('missing'), -contains('lag1'))) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., value ~ si_within + si_between + summerbreak + personal_time_z + (si_within|ID),
+                                        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+# models_si_binary_predict_missingness = daily_weekly_si %>%
+#   pivot_longer(c(contains('missing'), -contains('lag1'))) %>%
+#   group_by(name) %>%
+#   nest() %>%
+#   mutate(model = map(data, ~brms::brm(data = ., value ~ si_bin + summerbreak + personal_time_z + (si_bin|ID),
+#                                         family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+```
+
+### Model outcomes weekly (with linear regression)
+```{r}
+models_si_predict_missingness_weekly = daily_weekly_si_grouped_weeks %>%
+  pivot_longer(c(contains('prop_missing'))) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., value ~ si + summerbreak + personal_time_z + (si|ID),
+                                        chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+models_si_predict_missingness_weekly_discrete = daily_weekly_si_grouped_weeks %>%
+  mutate(si = as.character(si)) %>%
+  pivot_longer(c(contains('prop_missing'))) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., value ~ si + summerbreak + personal_time_z + (si|ID),
+                                        chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+# models_si_binary_predict_missingness_weekly = daily_weekly_si_grouped_weeks %>%
+#   pivot_longer(c(contains('prop_missing'))) %>%
+#   group_by(name) %>%
+#   nest() %>%
+#   mutate(model = map(data, ~brms::brm(data = ., value ~ si_bin + summerbreak + personal_time_z + (si_bin|ID),
+#                                         chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+```
+
+## Calculate OR
+
+
+### Daily models
+```{r}
+or_within_si_predict_missingness = models_si_predict_missingness %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'si_within', type = 'response',
+                                                  at = list('si_within'=c(0,1))) %>%
+                           pairs(reverse = TRUE) %>%
+                           confint(level = 0.95) %>%
+                           data.frame()
+    
+  )) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model) %>%
+  mutate('type'='Mean SI Severity')
+
+or_between_si_predict_missingness = models_si_predict_missingness %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'si_between', type = 'response',
+                                                  at = list('si_between'=c(0,1))) %>%
+                           pairs(reverse = TRUE) %>%
+                           confint(level = 0.99) %>%
+                           data.frame()
+    
+  )) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model) %>%
+  mutate('type'='Change in SI Severity\nWithin-Person')
+
+models_si_predict_missingness_predictions = models_si_predict_missingness %>%
+  mutate(pred_grid = purrr::map(model, ~conditional_effects(., plot = FALSE)$si_within)) %>%
+  unnest(pred_grid) %>%
+  dplyr::select(-data, -model)
+```
+
+### Weekly models
+```{r}
+coef_si_predict_missingness_weekly = models_si_predict_missingness_weekly %>%
+  mutate(coef = map(model, ~broom.mixed::tidy(., conf.int = TRUE))) %>%
+  unnest(coef) %>%
+  dplyr::select(-data, -model) 
+
+# coef_si_binary_predict_missingness_weekly = models_si_binary_predict_missingness_weekly %>%
+#   mutate(coef = map(model, ~broom.mixed::tidy(., conf.int = TRUE))) %>%
+#   unnest(coef) %>%
+#   dplyr::select(-data, -model) 
+
+models_si_predict_missingness_predictions_weekly = models_si_predict_missingness_weekly %>%
+  mutate(pred_grid = purrr::map(model, ~conditional_effects(., plot = FALSE)$si)) %>%
+  unnest(pred_grid) %>%
+  dplyr::select(-data, -model)
+
+models_si_predict_missingness_predictions_weekly_discrete = models_si_predict_missingness_weekly_discrete %>%
+  mutate(pred_grid = purrr::map(model, ~conditional_effects(., plot = FALSE)$si)) %>%
+  unnest(pred_grid) %>%
+  dplyr::select(-data, -model) %>%
+  mutate(si = parse_number(as.character(si))) %>%
+  mutate(name = dplyr::recode(name,
+                              'prop_missing_accel'='Accelerometer',
+                              'prop_missing_gps'='GPS',
+                              'prop_missing_keyboard'='Keyboard Input',
+                              'prop_missing_daily'='Daily Mood Survey'),
+         lower__ = ifelse(lower__<0, 0, lower__))
+```
+
+```{r}
+save(models_si_predict_missingness, 
+     models_si_predict_missingness_predictions,
+     or_within_si_predict_missingness, or_between_si_predict_missingness,
+     models_si_predict_missingness_weekly,
+     models_si_predict_missingness_weekly_discrete,
+     models_si_predict_missingness_predictions_weekly_discrete,
+     file = 'model_outputs/si_predict_next_week_missingness_brm.rda')
+```
+
+```{r}
+load('model_outputs/si_predict_next_week_missingness_brm.rda')
+```
+
+
+## Plots
+```{r}
+or_within_si_predict_missingness_corrected = models_si_predict_missingness %>%
+  mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'si_within', type = 'response',
+                                                  at = list('si_within'=c(0,1))) %>%
+                           pairs(reverse = TRUE) %>%
+                           confint(level = m) %>%
+                           data.frame()
+    
+  )) %>%
+  unnest(or) %>%
+  dplyr::select(-data, -model) %>%
+  mutate('type'='Mean SI Severity', 
+         corrected = 'Corrected')
+
+or_within_si_predict_missingness = mutate(or_within_si_predict_missingness, corrected = 'Uncorrected')
+
+or_within_si_predict_missingness = rbind(or_within_si_predict_missingness, or_within_si_predict_missingness_corrected)
+
+si_models_or_plot = or_within_si_predict_missingness %>% mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey')) %>%
+  dplyr::filter(corrected == 'Corrected') %>%
+  ggplot(data = ., aes(x = name, y = odds.ratio)) +
+  geom_hline(yintercept = 1, lty=2) + 
+  geom_point(aes(color = name), size = 3) +
+  geom_errorbar(data = or_within_si_predict_missingness %>% mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey')) %>%
+                            dplyr::filter(corrected == 'Uncorrected'), 
+                aes(ymin = lower.HPD, ymax = upper.HPD, color = name), width = 0, lwd = 2) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD, color = name), width = 0) +
+  coord_flip() + 
+  scale_y_log10() +
+  scale_color_manual(values =pal2) +
+  theme(legend.position = 'none') +
+  labs(x = NULL, y = 'Adjusted Odds Ratio', title = 'B) Suicidal ideation as a predictor of missing data probability over the next week') +
+  annotate(geom='text', x = 0.67, y = 0.8, label = 'More frequent SI-->\nless missing data next week', size = 4) +
+  annotate(geom='text', x = 0.67, y = 1.3, label = 'More frequent SI-->\nmore missing data next week', size = 4) 
+
+```
+
+```{r}
+alt_fig5 = cowplot::plot_grid(missingness_predict_si_coef_plot, si_models_or_plot, nrow = 2)
+cowplot::save_plot(alt_fig5, filename = '../../figures/fig8.2_si_missingness_stats.png', base_width = 9, base_height = 7)
+```
+
+## Marginal Predictions Plots for SI predicting missingness
+
+```{r}
+si_models_curves_plot = models_si_predict_missingness_predictions %>%
+  mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey')) %>%
+  ggplot(data = ., aes(x = si, y = estimate__)) +
+  geom_line() + 
+  geom_ribbon(aes(ymin = lower__, ymax = upper__, fill= name), alpha = 0.3) +
+  facet_grid(~name) +
+  labs(y = 'P(Missing)\nDuring the next week', x = 'Suicidal Ideation Frequency\nRelative to Within-Person Average') +
+  scale_fill_manual(values = pal2) +
+  theme(legend.position = 'none')
+
+coef_within_si_predict_missingness_weekly_for_plot = dplyr::filter(coef_si_predict_missingness_weekly,
+                                                                   term == 'si') %>%
+  mutate(sig = case_when(conf.low < 0 & conf.high < 0 ~ 1,
+                         conf.low > 0 & conf.high > 0 ~ 1,
+                         conf.low <= 0 & conf.high >= 0 ~ 0),
+        name = dplyr::recode(name,
+                              'prop_missing_accel'='Accelerometer',
+                              'prop_missing_gps'='GPS',
+                              'prop_missing_keyboard'='Keyboard Input',
+                              'prop_missing_daily'='Daily Mood Survey'),
+         plot_label = paste0('\u03B2', '=', round(estimate, 2), ', 95% CI [', format(round(conf.low, 2), nsmall=2), ', ', format(round(conf.high, 2),nsmall=2), ']'),
+         plot_label = ifelse(sig ==1, paste0(plot_label, '\u002A'), plot_label))
+
+
+daily_weekly_si_grouped_weeks_bins = daily_weekly_si_grouped_weeks %>%
+  dplyr::filter(is.numeric(si), !is.na(si)) %>%
+  pivot_longer(c(contains('prop_missing'))) %>%
+  group_by(ID, name, si) %>%
+  summarise(`estimate__`=mean(value)) %>%
+  mutate(name = dplyr::recode(name,
+                              'prop_missing_accel'='Accelerometer\n% Missing Next Week',
+                              'prop_missing_gps'='GPS\n% Missing Next Week',
+                              'prop_missing_keyboard'='Keyboard Input\n% Missing Next Week',
+                              'prop_missing_daily'='Daily Mood Survey\n% Missing Next Week')) 
+
+si_models_curves_weekly_plot = models_si_predict_missingness_predictions_weekly %>%
+  mutate(name = dplyr::recode(name,
+                              'prop_missing_accel'='Accelerometer',
+                              'prop_missing_gps'='GPS',
+                              'prop_missing_keyboard'='Keyboard Input',
+                              'prop_missing_daily'='Daily Mood Survey')) %>%
+  ggplot(data = ., aes(x = si, y = estimate__)) +
+  geom_line(lwd = 2) + 
+  geom_point(data = models_si_predict_missingness_predictions_weekly_discrete, aes(color = name)) +
+  geom_errorbar(data = models_si_predict_missingness_predictions_weekly_discrete, aes(ymin = lower__, ymax = upper__, color = name), 
+                width = 0) +
+  geom_ribbon(aes(ymin = lower__, ymax = upper__, fill= name), alpha = 0.3) +
+  facet_grid(~name) +
+  labs(y = 'Days Missing Data\nDuring the next week', x = 'Suicidal Ideation Frequency\n1=Never, 2=Rarely, 3=Sometimes, 4=Frequently, 4=All The Time',
+       title = 'B: Suicidal Ideation Frequency as a Within-Person Predictor of Missing Data Over the Next Week') +
+  scale_fill_manual(values = pal2) +
+  scale_color_manual(values = pal2) +
+  theme(legend.position = 'none') +
+  # geom_text(data =coef_within_si_predict_missingness_weekly_for_plot,
+  #          aes(label = plot_label),
+  #          x = 0.8, y = 6, hjust = 0) +
+  ylim(0,7) 
+
+si_models_curves_weekly_plot_gps_daily = models_si_predict_missingness_predictions_weekly %>%
+  mutate(name = dplyr::recode(name,
+                              'prop_missing_accel'='Accelerometer',
+                              'prop_missing_gps'='GPS',
+                              'prop_missing_keyboard'='Keyboard Input',
+                              'prop_missing_daily'='Daily Mood Survey')) %>%
+  dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')) %>%
+  ggplot(data = ., aes(x = si, y = estimate__)) +
+  geom_line(lwd = 2) + 
+  geom_point(data = models_si_predict_missingness_predictions_weekly_discrete %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')), 
+             aes(color = name)) +
+  geom_errorbar(data = models_si_predict_missingness_predictions_weekly_discrete %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')), 
+                aes(ymin = lower__, ymax = upper__, color = name), 
+                width = 0) +
+  geom_ribbon(aes(ymin = lower__, ymax = upper__, fill= name), alpha = 0.3) +
+  facet_grid(~name) +
+  labs(y = 'Days Missing Data\nDuring the next week', x = 'Suicidal Ideation Frequency\n1=Never, 2=Rarely, 3=Sometimes, 4=Frequently, 4=All The Time',
+       title = 'B: Suicidal Ideation Frequency as a Within-Person Predictor of\nMissing Data Over the Next Week') +
+  scale_fill_manual(values = pal2[2:3]) +
+  scale_color_manual(values = pal2[2:3]) +
+  theme(legend.position = 'none') +
+  # geom_text(data =coef_within_si_predict_missingness_weekly_for_plot %>% dplyr::filter(name %in% c('GPS', 'Daily Mood Survey')),
+  #          aes(label = plot_label),
+  #          x = 0.8, y = 6, hjust = 0) +
+  ylim(0,7) 
+  
+```
+
+# 3: Assemble grid for Marginal Predictions Plots
+
+```{r}
+si_missingness_grid = cowplot::plot_grid(missingness_predict_si_plot, si_models_curves_weekly_plot,
+                                         nrow = 2,
+                                         align = 'v', axis = 'lr')
+
+si_missingness_daily_gps= cowplot::plot_grid(missingness_predict_si_plot_daily_gps, si_models_curves_weekly_plot_gps_daily,
+                                         nrow = 2,
+                                         align = 'v', axis = 'lr')
+
+cowplot::save_plot(si_missingness_grid, file = '../../figures/fig8.1_si_missingness.png',
+                   base_height = 6, base_width = 9.5)
+
+cowplot::save_plot(si_missingness_daily_gps, file = '../../figures/fig8.1_si_missingness_daily_gps.png',
+                   base_height = 6, base_width = 6)
+```
+

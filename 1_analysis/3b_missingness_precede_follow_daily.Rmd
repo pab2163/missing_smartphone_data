@@ -1,0 +1,249 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+options(buildtools.check = function(action) TRUE)
+source('model_wrapper_functions.R')
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+```
+
+
+```{r}
+daily_r = daily %>%
+  group_by(ID) %>%
+  mutate(missing_daily_lag1 = lag(missing_daily, n= 1),
+         missing_gps_lag1 = lag(missing_gps, n=1),
+         missing_accel_lag1 = lag(missing_accel, n = 1),
+         missing_keyboard_lag1 = lag(missing_keyboard), n = 1,
+         daily_within = daily - median(daily, na.rm = TRUE),
+         daily_between = median(daily, na.rm = TRUE),
+         daily_within_lag1 = lag(daily_within, n = 1)) %>%
+  ungroup() %>%
+  mutate(daily_within_scaled = scale(daily_within, center = FALSE, scale = TRUE),
+         daily_between_scaled = scale(daily_between, center=FALSE, scale = TRUE),
+         daily_within_lag1_scaled = scale(daily_within_lag1, center = FALSE, scale = TRUE))
+
+
+daily_long = daily_r %>%
+  pivot_longer(c(contains('missing'), -missing_daily, -missing_daily_lag1))
+
+```
+
+# Daily predict missingness next day
+
+```{r daily_pred_missing_models}
+daily_predict_missingness_models = daily_long %>%
+  group_by(name) %>%
+  dplyr::filter(!grepl('lag1', name)) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., value ~ daily_within_scaled + daily_between + weekend + summerbreak + personal_time_z + (daily_within|ID),
+                                        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+daily_predict_missingness_or = daily_predict_missingness_models %>%
+  mutate(coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)))) %>%
+  dplyr::select(-model, -data) %>%
+  unnest(coef) %>%
+  mutate(model_type = 'daily')
+
+daily_predict_missingness_models_lag1 = daily_long %>%
+  group_by(name) %>%
+  dplyr::filter(!grepl('lag1', name)) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., value ~ daily_within_lag1_scaled + daily_between + weekend + summerbreak + personal_time_z + (daily_within_lag1|ID),
+                                        family = bernoulli(link = 'logit'), chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+daily_predict_missingness_or_lag1 = daily_predict_missingness_models_lag1 %>%
+  mutate(coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)))) %>%
+  dplyr::select(-model, -data) %>%
+  unnest(coef) %>%
+  mutate(model_type = 'daily_lag1')
+```
+
+```{r save_daily_pred_missing_models}
+save(daily_predict_missingness_models, daily_predict_missingness_models_lag1, 
+     daily_predict_missingness_or, daily_predict_missingness_or_lag1,
+     file = 'model_outputs/daily_predict_passive_missingness.rda')
+```
+
+
+# Missingness day before predict daily today
+
+```{r missing_pred_daily_models}
+missingness_predict_daily_models_lag1 = daily_long %>%
+  group_by(name) %>%
+  dplyr::filter(grepl('lag1', name)) %>%
+  nest() %>%
+  mutate(model = map(data, ~brms::brm(data = ., daily_within_scaled ~ value + weekend + summerbreak + personal_time_z + (value|ID),
+                                      chains = 4, cores = 4, iter = 4000, seed = 11291993, prior = beta_prior)))
+
+
+missingness_predict_daily_models_lag1_coef = missingness_predict_daily_models_lag1 %>%
+  mutate(coef = purrr::map(model, ~broom.mixed::tidy(., conf.int=TRUE, conf.level = 0.95))) %>%
+  dplyr::select(-model, -data) %>%
+  unnest(coef) 
+
+save(missingness_predict_daily_models_lag1, 
+     missingness_predict_daily_models_lag1_coef,
+     file = 'model_outputs/passive_missingness_predict_daily.rda')
+```
+
+```{r}
+load('model_outputs/passive_missingness_predict_daily.rda')
+load('model_outputs/daily_predict_passive_missingness.rda')
+```
+
+# Plotting
+```{r plot1}
+p_prior = missingness_predict_daily_models_lag1_coef %>%
+  dplyr::filter(term=='valueTRUE') %>%
+  dplyr::mutate(name = dplyr::recode(name, 
+                                     'missing_accel_lag1'='Accelerometer',
+                                     'missing_gps_lag1'='GPS',
+                                     'missing_keyboard_lag1'='Keyboard Input')) %>%
+  ggplot(data = ., aes(x = name, y = estimate, color = name)) +
+    geom_hline(yintercept = 0, lty = 2) + 
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, lwd = 1) +
+  labs(y = 'Association With Daily Mood\nBeta Coefficient + 95% CI',
+       x = 'Missing Data Modality 1 Day Prior', 
+       title = '') +
+  theme_bw() +
+  scale_color_manual(values= c(
+      "Accelerometer" = pal2[1], 
+      "Daily Mood Survey" = pal2[2], 
+      "GPS" = pal2[3], 
+      "Keyboard Input" = pal2[4], 
+      "Weekly SI Survey" = pal2[5]
+    ),
+    limits= c(
+      "Keyboard Input", 
+      "GPS", 
+      "Accelerometer",
+      "Weekly SI Survey",
+      "Daily Mood Survey"
+    )) +
+  theme(legend.position = 'none')
+```
+
+```{r plot2}
+p_same = daily_predict_missingness_or %>%
+  dplyr::filter(term=='daily_within_scaled') %>%
+    dplyr::mutate(name = dplyr::recode(name, 
+                                     'missing_accel'='Accelerometer',
+                                     'missing_gps'='GPS',
+                                     'missing_keyboard'='Keyboard Input')) %>%
+  ggplot(data = ., aes(x = name, y = estimate, color = name)) +
+    geom_hline(yintercept = 1, lty = 2) + 
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, lwd = 1) +
+  labs(y = 'Adjusted Odds Ratio for Missing Smartphone Sensor Data\nAssociation with +1SD Change in Daily Mood',
+       x = 'Missing Smartphone Sensor Data Same Day', 
+       title = '') +
+  theme_bw() +
+  scale_y_log10(limits = c(0.85, 1.15)) + 
+  scale_color_manual(values= c(
+      "Accelerometer" = pal2[1], 
+      "Daily Mood Survey" = pal2[2], 
+      "GPS" = pal2[3], 
+      "Keyboard Input" = pal2[4], 
+      "Weekly SI Survey" = pal2[5]
+    ),
+    limits= c(
+      "Keyboard Input", 
+      "GPS", 
+      "Accelerometer",
+      "Weekly SI Survey",
+      "Daily Mood Survey"
+    )) +
+  theme(legend.position = 'none')
+
+p_next = daily_predict_missingness_or_lag1 %>%
+  dplyr::filter(term=='daily_within_lag1_scaled') %>%
+    dplyr::mutate(name = dplyr::recode(name, 
+                                     'missing_accel'='Accelerometer',
+                                     'missing_gps'='GPS',
+                                     'missing_keyboard'='Keyboard Input')) %>%
+  ggplot(data = ., aes(x = name, y = estimate, color = name)) +
+    geom_hline(yintercept = 1, lty = 2) + 
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, lwd = 1) +
+  labs(y = 'Adjusted Odds Ratio for Missing Smartphone Sensor Data\nAssociation with +1SD Change in Daily Mood',
+       x = 'Missing Smartphone Sensor Data Next Day', 
+       title = '') +
+  theme_bw() +
+  scale_y_log10(limits = c(0.85, 1.15)) + 
+  scale_color_manual(values= c(
+      "Accelerometer" = pal2[1], 
+      "Daily Mood Survey" = pal2[2], 
+      "GPS" = pal2[3], 
+      "Keyboard Input" = pal2[4], 
+      "Weekly SI Survey" = pal2[5]
+    ),
+    limits= c(
+      "Keyboard Input", 
+      "GPS", 
+      "Accelerometer",
+      "Weekly SI Survey",
+      "Daily Mood Survey"
+    )) +
+  theme(legend.position = 'none') 
+```
+
+
+```{r saveplot}
+missingness_precede_follow_daily_mood = cowplot::plot_grid(p_prior, p_same, p_next, ncol = 3, labels = c('A', 'B', 'C'))
+cowplot::save_plot(missingness_precede_follow_daily_mood, filename = '../../figures/supplement/missingness_preced_follow_changes_daily_mood.png', 
+                   base_height = 4.8, base_width =11.5) 
+```

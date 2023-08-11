@@ -1,0 +1,309 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+source('model_wrapper_functions.R')
+#library(ggfortify)
+```
+
+# Load daily data
+
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+```
+
+
+
+```{r}
+daily = dplyr::filter(daily, TIMEPNT==6, day_num <=200)
+```
+
+
+# Join in self-report followup data
+
+```{r}
+load('../../cleaned_data/cleaned_baseline_data.rda')
+
+self_report_6 = self_report_6 %>%
+  mutate(across(c(contains('_change'), ends_with('_6')), scale))
+
+daily = left_join(daily, dplyr::select(self_report_6, -siteCUMC), by = 'ID')
+
+```
+
+
+```{r}
+scale_outcomes = c(names(self_report_6)[endsWith(names(self_report_6), '_6')],
+  names(self_report_6)[endsWith(names(self_report_6), '_change')])
+
+sociodemographic_predictors = sociodemographic_predictors[! sociodemographic_predictors %in% 
+                                                                 c('White', 'interview_date_numeric')]
+
+all_predictors = c(scale_outcomes, sociodemographic_predictors)
+
+m = length(scale_outcomes)
+conf_level_corrected = 1- (0.05/m)
+```
+
+
+# Daily mood & GPS
+
+```{r}
+daily_ols = daily %>%
+  #mutate(site = ifelse(startsWith(ID, '1'), 'CUIMC', 'PITT')) %>%
+  #dplyr::filter(day_num < 200) %>%
+  group_by_at(all_of(c('ID', all_predictors))) %>%
+  summarise(pct_missing_daily = sum(missing_daily)/n(),
+            pct_missing_gps = sum(missing_gps)/n(),
+            pct_missing_accel = sum(missing_accel)/n(),
+            pct_missing_keyboard = sum(missing_keyboard)/n())
+```
+
+```{r}
+daily_ols_long = daily_ols %>%
+  ungroup() %>%
+  mutate(across(starts_with('pct_missing'), scale)) %>%
+  pivot_longer(cols = all_of(scale_outcomes)) 
+
+
+
+ols_month6_models = function(formula, df, conf_level_corrected){
+  model_df = df %>%
+    group_by(name) %>%
+    nest() %>%
+    mutate(model = purrr::map(data, ~lm(data = ., 
+                                              formula = formula)),
+           coef_uncorrected = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = 0.95)),
+           coef_corrected = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = conf_level_corrected)))
+  
+  
+  coef_uncorrected = model_df %>%
+    unnest(coef_uncorrected) %>%
+    dplyr::select(-model, -data)  %>%
+    mutate(coef_type = 'uncorrected')
+
+  coef_corrected= model_df %>%
+    unnest(coef_corrected) %>%
+    dplyr::select(-model, -data)  %>%
+    mutate(coef_type = 'corrected')
+  
+  return(rbind(coef_corrected, coef_uncorrected))
+  
+}
+
+daily_pct_formula = as.formula(paste('value ~ pct_missing_daily + ', 
+                                     paste(sociodemographic_predictors, collapse = '+')))
+gps_pct_formula = as.formula(paste('value ~ pct_missing_gps + ', 
+                                     paste(sociodemographic_predictors, collapse = '+')))
+accel_pct_formula = as.formula(paste('value ~ pct_missing_keyboard + ', 
+                                     paste(sociodemographic_predictors, collapse = '+')))
+keyboard_pct_formula = as.formula(paste('value ~ pct_missing_accel + ', 
+                                     paste(sociodemographic_predictors, collapse = '+')))
+
+ols_6_coefs_daily = ols_month6_models(formula = daily_pct_formula, df = daily_ols_long, conf_level_corrected = conf_level_corrected) %>%
+  mutate(type = 'Daily Mood Survey') 
+ols_6_coefs_gps = ols_month6_models(formula = gps_pct_formula, df = daily_ols_long, conf_level_corrected = conf_level_corrected) %>%
+  mutate(type = 'GPS') 
+ols_6_coefs_accel = ols_month6_models(formula = accel_pct_formula, df = daily_ols_long, conf_level_corrected = conf_level_corrected) %>%
+  mutate(type = 'Accelerometer') 
+ols_6_coefs_keyboard = ols_month6_models(formula = keyboard_pct_formula, df = daily_ols_long, conf_level_corrected = conf_level_corrected) %>%
+  mutate(type = 'Keyboard Input') 
+
+
+```
+
+
+# Risk
+
+```{r}
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID') 
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+
+risk_missing_summary = risk_missing %>%
+  group_by(ID) %>%
+  summarise(risk_missing_pct = sum(risk_missing)/n())
+
+
+risk_missing_summary =left_join(risk_missing_summary, self_report_6, by = 'ID') 
+
+
+
+risk_long = risk_missing_summary %>%
+  ungroup() %>%
+  mutate(pct_missing_risk = scale(risk_missing_pct)) %>%
+  pivot_longer(cols = all_of(scale_outcomes)) 
+
+
+risk_pct_formula = as.formula(paste('value ~ pct_missing_risk + ', 
+                                     paste(sociodemographic_predictors, collapse = '+')))
+
+ols_6_coefs_risk = ols_month6_models(formula = risk_pct_formula, df = risk_long, conf_level_corrected = conf_level_corrected) %>%
+  mutate(type = 'Weekly SI Survey') 
+
+```
+
+
+
+```{r}
+combined_coef = rbind(ols_6_coefs_accel, 
+                      ols_6_coefs_daily, 
+                      ols_6_coefs_gps,
+                      ols_6_coefs_keyboard,
+                      ols_6_coefs_risk)
+
+combined_coef = combined_coef %>%
+    mutate(variable_category = ifelse(grepl('change', name), 'Change\n6-month Visit > Baseline', '6-month Visit')) %>%
+  mutate(
+    name = gsub('_change', '_6', name),
+    v = case_when(
+    name %in% c('parentscollege', 'interview_age_years',
+                                     'iPhone','White', 'Black', 'Asian', 'Multiracial', 'hispanic','income_ordinal', 
+                                     'cisgender', 'sexF', 'siteCUMC', 'genderM') ~ 'Sociodemographic',
+    name %in% c('SHAPS_TOT_r_i', 'MFQ_i',
+                 'SCARED_i', 'SSI19_i', 'INQ_burdenensomeness_i', 'INQ_thwartedbelonging_i', 'SITBI_SB_ever', 'SITBI_sa_ever', 'hospitalization_pastyear', 'visit_er_pastyear',
+                 'SITBI_engaged_nssi_ever', 'SITBI_sa_ever', 'current_medication', 'current_therapy') ~ 'Clinical'),
+   name = dplyr::recode(name, 'interview_age_years'='Age (Years)',
+                            'SITBI_engaged_nssi_ever'='Lifetime NSSI (SITBI)',
+                            'MFQ_6'='Depression Symptoms (MFQ)', 'comorbidity_current'='# Current Diagnoses',
+                            'SITBI_sa_ever'='Liftime Suicide Attempt (SITBI)', 'SHAPS_TOT_r_6'='Anhedonia (SHAPS)',
+                            'SITBI_si_ever'='Lifetime Suicidal Ideaction (SITBI)', 'hospitalization_pastyear' = 'Past Year Hospitalization',
+                            'visit_er_pastyear'='Past Year ER Visit', 'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
+                            'SCARED_6'='Anxiety Symptoms (SCARED)', 'SSI19_6'='Suicidal Ideation Severity (SSI)',
+                            'INQ_burdenensomeness_6'='Percieved Burdensomeness (INQ)', 'INQ_thwartedbelonging_6'='Thwarted Belonging (INQ)',
+                            'hispanic'='Hispanic','income_ordinal'='Parental Income',
+                            'cisgender'='Cisgender', 'sexF'='Female Sex', 'genderM'='Male Gender', 'heterosexual'='Heterosexual',
+                            'siteCUMC'='Site (NYC)', 'parentscollege'='Parent Completed College', 'current_therapy'='Current Therapy',
+                            'current_medication'='Current Medication'))
+
+combined_coef_corrected = dplyr::filter(combined_coef, coef_type == 'corrected', grepl('missing', term))
+
+fig6_timepoint6 = combined_coef %>%
+  dplyr::filter(grepl('missing', term), coef_type == 'uncorrected') %>%
+  ggplot(data=., aes(x = fct_reorder(.f = name, .x = estimate), y = estimate)) +
+  geom_point(position = position_dodge(0.4), aes(color = type)) +
+  #geom_errorbar(data = combined_coef_corrected, aes(ymin = conf.low, ymax = conf.high, color = type), width = 0, position = position_dodge(0.4)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high, color = type), width = 0, position = position_dodge(0.4)) +
+  coord_flip() +
+  labs(x = NULL, y = 'Association between % missing data and clinical acuity at 6-month visit\nStandardized linear regression coefficient') + 
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(color = NULL) +
+  scale_color_manual(values = pal2) +
+  facet_grid(~variable_category)
+
+
+ggsave(fig6_timepoint6, filename ='../../figures/fig6.1_missingness_predict_6mo_clinical_acuity.png', width = 7, height = 5)
+
+```
+
+
+```{r}
+# risk_ols_models = risk_ols %>%
+#   nest() %>%
+#   mutate(model = purrr::map(data, ~lm(data = .,  formula = as.formula(paste('scaled_predictor ~ risk_missing_pct  + interview_age_years + GENDER + site ')))),
+#          coef = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = 0.95)),
+#          coef_corrected = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = conf_level_corrected)))
+# 
+# 
+# 
+# 
+# risk_ols_coef_uncorrected = risk_ols_models %>%
+#   unnest(coef) %>%
+#   mutate(coef_type = 'uncorrected')
+# 
+# risk_ols_coef_corrected = risk_ols_models %>%
+#   unnest(coef_corrected) %>%
+#   mutate(coef_type = 'corrected')
+# 
+# risk_ols_coef = rbind(risk_ols_coef_corrected, risk_ols_coef_uncorrected)
+```
+
+
+
+```{r}
+risk_ols_coef = risk_ols_coef %>%
+  #dplyr::select(-data, -model) %>%
+  mutate(type = 'Weekly Suicide Risk')
+
+daily_ols_coef = daily_ols_coef %>%
+  #dplyr::select(-model30, -coef30) %>%
+  mutate(type = 'Daily Mood')
+
+gps_ols_coef = gps_ols_coef %>%
+ # dplyr::select(-model30, -coef30) %>%
+  mutate(type = 'Daily GPS')
+
+
+combined_coef = rbind(daily_ols_coef, gps_ols_coef, risk_ols_coef)
+
+combined_coef = combined_coef %>%
+  mutate(variable_category = case_when(
+    name %in% c('parentscollege', 'interview_age_years',
+                                     'iPhone','White', 'Black', 'Asian', 'Multiracial', 'hispanic','income_ordinal', 
+                                     'cisgender', 'sexF', 'siteCUMC', 'genderM') ~ 'Sociodemographic',
+    name %in% c('SHAPS_TOT_r_i', 'MFQ_i',
+                 'SCARED_i', 'SSI19_i', 'INQ_burdenensomeness_i', 'INQ_thwartedbelonging_i', 'SITBI_SB_ever', 'SITBI_sa_ever', 'hospitalization_pastyear', 'visit_er_pastyear',
+                 'SITBI_engaged_nssi_ever', 'SITBI_sa_ever', 'current_medication', 'current_therapy') ~ 'Clinical'),
+   name = dplyr::recode(name, 'interview_age_years'='Age (Years)',
+                            'SITBI_engaged_nssi_ever'='Lifetime NSSI (SITBI)',
+                            'MFQ_6'='Depression Symptoms (MFQ)', 'comorbidity_current'='# Current Diagnoses',
+                            'SITBI_sa_ever'='Liftime Suicide Attempt (SITBI)', 'SHAPS_TOT_r_6'='Anhedonia (SHAPS)',
+                            'SITBI_si_ever'='Lifetime Suicidal Ideaction (SITBI)', 'hospitalization_pastyear' = 'Past Year Hospitalization',
+                            'visit_er_pastyear'='Past Year ER Visit', 'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
+                            'SCARED_6'='Anxiety Symptoms (SCARED)', 'SSI19_6'='Suicidal Ideation Severity (SSI)',
+                            'INQ_burdenensomeness_6'='Percieved Burdensomeness (INQ)', 'INQ_thwartedbelonging_6'='Thwarted Belonging (INQ)',
+                            'hispanic'='Hispanic','income_ordinal'='Parental Income',
+                            'cisgender'='Cisgender', 'sexF'='Female Sex', 'genderM'='Male Gender', 'heterosexual'='Heterosexual',
+                            'siteCUMC'='Site (NYC)', 'parentscollege'='Parent Completed College', 'current_therapy'='Current Therapy',
+                            'current_medication'='Current Medication'))
+
+combined_coef_corrected = dplyr::filter(combined_coef, coef_type == 'corrected', grepl('missing', term))
+
+fig6_timepoint6 = combined_coef %>%
+  dplyr::filter(grepl('missing', term), coef_type == 'uncorrected') %>%
+  ggplot(data=., aes(x = fct_reorder(.f = name, .x = estimate), y = estimate)) +
+  geom_point(position = position_dodge(0.4), aes(color = type)) +
+  geom_errorbar(data = combined_coef_corrected, aes(ymin = conf.low, ymax = conf.high, color = type), width = 0, position = position_dodge(0.4)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high, color = type), lwd = 1, width = 0, position = position_dodge(0.4)) +
+  coord_flip() +
+  labs(x = NULL, y = 'Standardized linear regression coefficient', 
+       title = 'Missing data associations with clinical acuity at 6-month follow-up') +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(color = NULL) +
+  scale_color_viridis_d(end = 0.8)
+
+```
+
+
+```{r}
+ggsave(fig6_timepoint6, filename = '../../figures/fig6_timepoint6.png', width = 8, height = 6)
+
+```

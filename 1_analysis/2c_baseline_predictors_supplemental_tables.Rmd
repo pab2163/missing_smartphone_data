@@ -1,0 +1,117 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+library(cowplot)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+```
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+baseline_model_outputs = read.csv('model_outputs/baseline_predictors_missingness_brm_combined_or.csv')
+
+or_table = baseline_model_outputs %>%
+    dplyr::filter(term == 'scaled_predictor') %>% 
+    dplyr::select(-term, -Est.Error) %>%
+    pivot_wider(id_cols = c('name', 'type', 'estimate'), values_from = c('conf.low', 'conf.high'), names_from = 'or_type') %>%
+    dplyr::rename(., 'Adjusted Odds Ratio'='estimate') %>%
+    mutate(`95% CI`=paste0('[', format(round(conf.low_uncorrected, digits = 3), nsmall=3), ', ', format(round(conf.high_uncorrected, digits = 3), nsmall=3), ']'),
+           `99.67% CI`=paste0('[', format(round(conf.low_corrected, digits = 3), nsmall=3), ', ', format(round(conf.high_corrected, digits = 3), nsmall=3), ']'),
+           Significance = case_when(
+              conf.low_corrected > 1 & conf.high_corrected > 1 ~ '#',
+              conf.low_corrected < 1 & conf.high_corrected < 1 ~ '#',
+              conf.low_uncorrected < 1 & conf.high_uncorrected < 1 ~ '+',
+              conf.low_uncorrected > 1 & conf.high_uncorrected > 1 ~ '+')) %>%
+    dplyr::select('Predictor'=name, type, `Adjusted Odds Ratio`, `95% CI`, `99.67% CI`, Significance) %>%
+    mutate(Predictor = dplyr::recode(Predictor, 
+                           'interview_age_years'='Age (Years)',
+                           'SITBI_engaged_nssi_ever'='Lifetime NSSI (SITBI)',
+                           'MFQ_i'='Depression Symptoms (MFQ)',
+                           'SITBI_sa_ever'='Lifetime Suicide Attempt (SITBI)', 
+                           'SHAPS_TOT_r_i'='Anhedonia Symptoms (SHAPS)',
+                           'comorbidity_current'='# Current Diagnoses\n(MINI-KID)',
+                           'SITBI_si_ever'='Lifetime Suicidal Ideation (SITBI)', 
+                           'hospitalization_pastyear' = 'Past Year Hospitalization',
+                           'visit_er_pastyear'='Past Year ED Visit', 
+                           'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
+                           'SCARED_i'='Anxiety Symptoms (SCARED)', 
+                           'SSI19_i'='Suicidal Ideation Severity (SSI)',
+                           'INQ_burdenensomeness_i'='Percieved Burdensomeness (INQ)', 
+                           'INQ_thwartedbelonging_i'='Thwarted Belonging (INQ)',
+                           'hispanic'='Hispanic', 'sexMTRUE'='Assigned Male Sex',
+                           'siteCUMC'='Site (NYC)', 
+                           'current_therapy'='Current Therapy',
+                           'current_medication'='Current Medication'),
+          `Adjusted Odds Ratio`= format(round(`Adjusted Odds Ratio`, digits = 3), nsmall=3))
+
+
+for (vartype in unique(or_table$type)){
+    print(vartype)
+    d = dplyr::filter(or_table, type==vartype)
+    d[is.na(d)] = ''
+    d %>%
+        dplyr::select(-type) %>%
+        write.csv(., row.names = FALSE, file = paste0('../../tables/supplement/baseline_predictors', vartype, '.csv'))
+}
+```
+
+
+```{r}
+load('model_outputs/sociodemographic_predictors_missingness_brm.rda')
+```
+
+
+```{r}
+sociodem_or_table = combined_sociodem_or_brm %>%
+  dplyr::filter(!term %in% c('Intercept', 'personal_time_z', 'weekend', 'summerbreak1')) %>%
+  pivot_wider(id_cols = c('term', 'type', 'estimate'), values_from = c('conf.low', 'conf.high'), names_from = 'correction') %>%
+  dplyr::rename(., 'Adjusted Odds Ratio'='estimate') %>%
+    mutate(`95% CI`=paste0('[', format(round(conf.low_uncorrected, digits = 3), nsmall=3), ', ', format(round(conf.high_uncorrected, digits = 3), nsmall=3), ']'),
+           `99.67% CI`=paste0('[', format(round(conf.low_corrected, digits = 3), nsmall=3), ', ', format(round(conf.high_corrected, digits = 3), nsmall=3), ']'),
+           Significance = case_when(
+              conf.low_corrected > 1 & conf.high_corrected > 1 ~ '#',
+              conf.low_corrected < 1 & conf.high_corrected < 1 ~ '#',
+              conf.low_uncorrected < 1 & conf.high_uncorrected < 1 ~ '+',
+              conf.low_uncorrected > 1 & conf.high_uncorrected > 1 ~ '+')) %>%
+    dplyr::select('Predictor'=term, `Missing Data Modality`=type, `Adjusted Odds Ratio`, `95% CI`, `99.67% CI`, Significance) %>%
+  mutate(`Adjusted Odds Ratio`= format(round(`Adjusted Odds Ratio`, digits = 3), nsmall=3)) %>%
+  dplyr::arrange(Predictor, `Missing Data Modality`) %>%  
+  mutate(Predictor = dplyr::recode(Predictor, 'sexMTRUE'='Assigned Male Sex', 'interview_age_years'='Age (+1 Year)',
+                                'siteCUMCTRUE'='Site (NYC)', 'hispanic'='Hispanic'))
+
+sociodem_or_table[is.na(sociodem_or_table)] = ''
+
+sociodem_or_table %>%
+  dplyr::filter(`Missing Data Modality` %in% c('GPS', 'Accelerometer', 'Keyboard Input')) %>%
+  write.csv('../../tables/supplement/sociodem_or_table_passive.csv', row.names = FALSE)
+
+sociodem_or_table %>%
+  dplyr::filter(!`Missing Data Modality` %in% c('GPS', 'Accelerometer', 'Keyboard Input')) %>%
+  write.csv('../../tables/supplement/sociodem_or_table_esm.csv', row.names = FALSE)
+
+```

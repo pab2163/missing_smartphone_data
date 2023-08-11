@@ -1,0 +1,123 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+
+#library(ggfortify)
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+```
+
+
+
+```{r}
+get_prev_non_na <- function(x) {
+  output <- numeric(length(x))
+  prev_non_na <- NA
+  for (i in seq_along(x)) {
+    if (!is.na(x[i])) {
+      prev_non_na <- i
+    }
+    if (!is.na(prev_non_na)) {
+      output[i] <- i - prev_non_na
+    } else {
+      output[i] <- NA
+    }
+  }
+  output
+}
+
+
+daily = mutate(daily) %>%
+  group_by(ID) %>%
+  arrange(date) %>%
+  mutate(day_num_last_daily = get_prev_non_na(daily)) %>%
+  ungroup()
+
+
+
+
+daily_long2 = daily %>%
+  pivot_longer(c('missing_accel', 'missing_gps', 'missing_keyboard')) %>%
+  group_by(day_num_last_daily, iPhone, name,) %>%
+  summarise(prop_missing = sum(value)/n())
+
+
+
+days_since_last_survey_plot = daily_long2 %>%
+  dplyr::filter(!is.na(iPhone)) %>% 
+  mutate(iPhone = dplyr::recode(iPhone, '1'='iOS', '0'='Android'),
+         name = dplyr::recode(name, 'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input')) %>%
+  ggplot(data = ., aes(x = day_num_last_daily, y = prop_missing, color = factor(iPhone))) +
+  geom_point() +
+  geom_line() +
+  xlim(0,15) +
+  labs(x = 'Days since last observed daily mood survey', y = 'P(Missing)', color = NULL) +
+  facet_grid(~name) +
+  theme_bw()
+
+
+ggsave(days_since_last_survey_plot, filename = '../../figures/supplement/days_since_last_survey.png', height = 5, width = 8)
+
+daily_long_mod = daily %>%
+  pivot_longer(c('missing_accel', 'missing_gps', 'missing_keyboard')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~lme4::glmer(data = ., value ~ day_num_last_daily*iPhone + (1|ID),
+                                               family = binomial(link = 'logit'))),
+         coef = map(model, ~broom.mixed::tidy(., conf.int=TRUE)))
+
+daily_long_mod %>%
+  unnest(coef) %>%
+  dplyr::select(-data, -model) %>%
+  dplyr::filter(term != '(Intercept)', term != 'sd__(Intercept)') %>%
+  ggplot(data = ., aes(x = name, y = estimate, color = name)) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = conf.low, ymax=conf.high), width = 0) +
+  facet_grid(rows = vars(term), scales = 'free')
+```

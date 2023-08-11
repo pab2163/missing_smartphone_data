@@ -1,0 +1,94 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+library(cowplot)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+```
+
+# Load data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+```
+
+## Load baseline clinical predictor model results 
+
+```{r}
+load('model_outputs/baseline_predictors_missingness_brm_accel.rda')
+accel_outputs = accel_outputs[names(accel_outputs) != 'models_df']
+gc()
+
+load('model_outputs/baseline_predictors_missingness_brm_gps.rda')
+gps_outputs = gps_outputs[names(gps_outputs) != 'models_df']
+gc()
+
+load('model_outputs/baseline_predictors_missingness_brm_risk.rda')
+risk_outputs = risk_outputs[names(risk_outputs) != 'models_df']
+gc()
+
+
+load('model_outputs/baseline_predictors_missingness_brm_daily.rda')
+daily_outputs = daily_outputs[names(daily_outputs) != 'models_df']
+gc()
+
+load('model_outputs/baseline_predictors_missingness_brm_keyboard.rda')
+keyboard_outputs = keyboard_outputs[names(keyboard_outputs) != 'models_df']
+gc()
+```
+
+## Combine data and make clinical OR plot
+```{r}
+combined_or_bayes = rbind(risk_outputs$or_df %>% mutate(type = 'Weekly SI Survey'),
+                    daily_outputs$or_df %>% mutate(type = 'Daily Mood Survey'),
+                    gps_outputs$or_df %>% mutate(type = 'GPS'),
+                    accel_outputs$or_df %>% mutate(type = 'Accelerometer'),
+                    keyboard_outputs$or_df %>% mutate(type = 'Keyboard Input'))
+
+combined_or_bayes %>%
+    dplyr::select(-convergence_message) %>%
+    write.csv(., file = 'model_outputs/baseline_predictors_missingness_brm_combined_or.csv', row.names = FALSE)
+
+clinical_or_mlm_bayes = baseline_predictors_missingness_or_plot(combined_or_bayes, m = m, bayes = TRUE)
+```
+
+## Load sociodem model results & make odds ratio plot
+```{r}
+load('model_outputs/sociodemographic_predictors_missingness_brm.rda')
+
+sociodem_plot_bayes = make_sociodem_or_plot(sociodem_or_df = combined_sociodem_or_brm, m = m, bayes=TRUE)
+```
+
+## Use cowplot to combine plots
+```{r}
+fig2_odds_ratio_bayes = cowplot::plot_grid(clinical_or_mlm_bayes, sociodem_plot_bayes, ncol = 1, align = 'v', axis = 'lr',
+                   labels = c('A', 'B'), rel_heights = c(1.5, 1))
+
+cowplot::save_plot(fig2_odds_ratio_bayes, filename = '../../figures/fig2.2_mlm_between_missingness_odds_ratio_brm.png',
+                   base_height = 10, base_width = 8)
+```

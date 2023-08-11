@@ -1,0 +1,142 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(brms)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+options(buildtools.check = function(action) TRUE)
+```
+
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+```
+
+```{r}
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+
+# Weekly risk data
+```{r}
+load('../../cleaned_data/risk.rda')
+
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID') 
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+```
+
+
+# Models of all clinical + sociodemographic predictors together
+
+```{r}
+combined_predictors_model = as.formula(paste('missing ~ personal_time_z + weekend + summerbreak +', 
+                                          paste(sociodemographic_predictors[sociodemographic_predictors!='interview_date_numeric'], collapse = '+'), ' +', 
+                                          paste(clinical_predictors, collapse = '+'), ' + (1 |ID)'))
+
+combined_predictors_model_weekly = as.formula(paste('missing ~ personal_time_z + summerbreak +', 
+                                          paste(sociodemographic_predictors[sociodemographic_predictors!='interview_date_numeric'], collapse = '+'), ' +', 
+                                          paste(clinical_predictors, collapse = '+'), ' + (1 |ID)'))
+
+daily_missing_long = daily %>%
+    pivot_longer(cols = c('missing_daily', 'missing_gps', 'missing_accel', 'missing_keyboard'), names_to = 'missing_outcome', values_to = 'missing') %>%
+    group_by(missing_outcome) 
+```
+
+## Fit the models
+```{r}
+combined_predictors_model_frame = daily_missing_long %>%
+      nest() %>%
+      mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model, 
+                                                 family = bernoulli(link = 'logit'),
+                                                 cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                 prior = beta_prior)))
+
+
+combined_predictors_risk_model_frame = risk_missing %>%
+  pivot_longer(cols = c('risk_missing'), names_to = 'missing_outcome', values_to = 'missing') %>%
+  group_by(missing_outcome) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model_weekly, 
+                                                 family = bernoulli(link = 'logit'),
+                                                 cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                 prior = beta_prior)))
+
+# save output
+save(combined_predictors_model_frame, combined_predictors_risk_model_frame, file = 'model_outputs/baseline_predictors_missingness_brm_predictors_combined.rda')
+```
+
+# Pull OR and plot
+```{r}
+combined_predictors_or_frame_risk = pull_separate_model_odds_ratios(model_df = combined_predictors_risk_model_frame, 
+                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
+
+combined_predictors_or_frame = pull_separate_model_odds_ratios(model_df = combined_predictors_model_frame, 
+                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
+
+combined_predictors_or_frame = rbind(combined_predictors_or_frame, combined_predictors_or_frame_risk)
+
+combined_predictors_or_frame_sociodem = dplyr::rename(combined_predictors_or_frame, 'type'='missing_outcome', 'correction'='or_type') %>%
+  dplyr::filter(term %in% c(sociodemographic_predictors, 'siteCUMCTRUE')) %>%
+  mutate(type = dplyr::recode(type, 
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey',
+                              'risk_missing'='Weekly SI Survey'))
+
+combined_predictors_or_frame = dplyr::rename(combined_predictors_or_frame, 'name'='term', 'type'='missing_outcome') %>%
+  mutate(term = 'scaled_predictor') %>%
+  dplyr::filter(name %in% clinical_predictors) %>%
+  mutate(type = dplyr::recode(type, 
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey',
+                              'risk_missing'='Weekly SI Survey'))
+
+
+clinical_or_mlm_bayes_combined = baseline_predictors_missingness_or_plot(or_df = combined_predictors_or_frame, m = m, bayes = TRUE)
+sociodem_plot_bayes_combined = make_sociodem_or_plot(sociodem_or_df = combined_predictors_or_frame_sociodem, m = m, bayes = TRUE)
+
+sfig_odds_ratio_bayes_baseline_combined = cowplot::plot_grid(clinical_or_mlm_bayes_combined, sociodem_plot_bayes_combined, ncol = 1, align = 'v', axis = 'lr',
+                   labels = c('A', 'B'), rel_heights = c(1.5, 1))
+
+cowplot::save_plot(sfig_odds_ratio_bayes_baseline_combined, filename = '../../figures/supplement/clinical_sociodem_baseline_predictors_togethr_between_missingness_odds_ratio_brm.png',
+                   base_height = 10, base_width = 8)
+```

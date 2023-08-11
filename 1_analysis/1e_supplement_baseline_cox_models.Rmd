@@ -1,0 +1,232 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(scales)
+library(survminer)
+library(brms)
+#library(ggfortify)
+theme_set(theme_bw())
+source('model_wrapper_functions.R')
+options(buildtools.check = function(action) TRUE)
+```
+
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+```{r}
+m = length(clinical_predictors)
+corrected_conf_level = 1- (0.05/m)
+```
+
+```{r}
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+```
+
+
+# Weekly risk data
+```{r}
+load('../../cleaned_data/risk.rda')
+
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID') 
+
+risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
+```
+
+
+## Add "dropout" variables to daily
+
+```{r}
+daily = mutate(daily, missing_everything = ifelse(missing_daily + missing_gps + missing_accel + missing_keyboard == 4, NA_real_, 0)) 
+
+get_prev_non_na <- function(x) {
+  output <- numeric(length(x))
+  prev_non_na <- NA
+  for (i in seq_along(x)) {
+    if (!is.na(x[i])) {
+      prev_non_na <- i
+    }
+    if (!is.na(prev_non_na)) {
+      output[i] <- i - prev_non_na
+    } else {
+      output[i] <- NA
+    }
+  }
+  output
+}
+
+daily_dropout = dplyr::select(daily, ID, date, day_num, contains('missing')) %>%
+  group_by(ID) %>%
+  arrange(date) %>%
+  mutate(day_num_last_phone_data = get_prev_non_na(missing_everything)) %>%
+  ungroup()
+
+
+first_dropout = daily_dropout %>%
+  dplyr::filter(day_num_last_phone_data == 30) %>%
+  group_by(ID) %>%
+  arrange(date) %>%
+  slice_min(n = 1, order_by = day_num)
+```
+
+# Survival
+
+```{r}
+no_gaps = daily %>%
+  dplyr::filter(TIMEPNT ==6) %>%
+  group_by(ID) %>%
+  summarise(day_num = max(day_num)) %>%
+  dplyr::filter(! ID %in% first_dropout$ID) %>%
+  mutate(status = 0)
+
+
+times_in_study = rbind(dplyr::select(first_dropout, ID, day_num) %>% mutate(status = 1), 
+      no_gaps)
+
+
+times_in_study = left_join(times_in_study, self_report_baseline, by = 'ID') %>%
+    mutate(site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC')
+
+# prelim_survival = survival::survfit(survival::Surv(day_num, status) ~group, data = times_in_study)
+# summary(prelim_survival)
+# 
+# prelim_survival_data = with(prelim_survival, data.frame(time, n.risk, n.event, std.err, surv, lower, upper))
+# 
+# autoplot(prelim_survival) +
+#   xlim(0,200) +
+#   labs(x = 'Days since baseline', y = '% of participants still in study\ndropout = 30+ day gap')
+# 
+# cox1 = survival::coxph(survival::Surv(day_num, status) ~group,data = times_in_study)
+# summary(cox1)
+# 
+cox2 = survival::coxph(survival::Surv(day_num, status) ~SITBI_si_ever ,data = times_in_study)
+
+summary(cox2)
+
+
+```
+
+
+
+```{r}
+cox_long = times_in_study %>%
+  pivot_longer(cols = c(clinical_predictors), values_to = 'scaled_predictor') %>%
+  group_by(name)
+
+cox_demographic = survival::coxph(survival::Surv(day_num, status) ~ interview_age_years +
+                                                     iPhone + Asian + White + Black + hispanic + sexM + siteCUMC, data = times_in_study)
+
+cox_demographic_tidy = broom.mixed::tidy(cox_demographic, conf.int=TRUE, exponentiate=TRUE) %>%
+  mutate(name = term)
+
+# nest data fit models
+cox_models = cox_long %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~survival::coxph(survival::Surv(day_num, status) ~ scaled_predictor + interview_age_years +
+                                                     iPhone + Asian + White + Black + hispanic + sexM + siteCUMC, data =.)),
+         coef = purrr::map(model, ~broom.mixed::tidy(., conf.int=TRUE, exponentiate=TRUE)))
+
+cox_coefs = cox_models %>%
+  unnest(coef) %>%
+  dplyr::select(-model, -data)
+
+
+cox_coefs = cox_coefs %>%
+    dplyr::filter(term == 'scaled_predictor') %>%
+    rbind(.,cox_demographic_tidy) %>%
+    mutate(variable_category = case_when(
+      name %in% c('current_medication', 'current_therapy', 'hospitalization_pastyear', 
+                      'visit_er_pastyear') ~ 'Service',
+      name %in% c('SITBI_SB_ever', 'SITBI_sa_ever', 'SITBI_engaged_nssi_ever', 
+                      'SITBI_si_ever') ~ 'SITBI',
+      name %in% c('SHAPS_TOT_r_i', 'MFQ_i', 'SCARED_i', 'SSI19_i', 'INQ_burdenensomeness_i', 
+                      'INQ_thwartedbelonging_i', 'comorbidity_current') ~ 'Psychopathology'),
+      name = dplyr::recode(name, 
+                           'interview_age_years'='Age (Years)',
+                           'SITBI_engaged_nssi_ever'='Lifetime NSSI (SITBI)',
+                           'MFQ_i'='Depression Symptoms (MFQ)',
+                           'SITBI_sa_ever'='Liftime Suicide Attempt (SITBI)', 
+                           'SHAPS_TOT_r_i'='Anhedonia Symptoms (SHAPS)',
+                           'comorbidity_current'='# Current Diagnoses\n(MINI-KID)',
+                           'SITBI_si_ever'='Lifetime Suicidal Ideation (SITBI)', 
+                           'hospitalization_pastyear' = 'Past Year Hospitalization',
+                           'visit_er_pastyear'='Past Year ED Visit', 
+                           'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
+                           'SCARED_i'='Anxiety Symptoms (SCARED)', 
+                           'SSI19_i'='Suicidal Ideation Severity (SSI)',
+                           'INQ_burdenensomeness_i'='Percieved Burdensomeness (INQ)', 
+                           'INQ_thwartedbelonging_i'='Thwarted Belonging (INQ)',
+                           'hispanic'='Hispanic', 'sexMTRUE'='Assigned Male Sex',
+                           'siteCUMCTRUE'='Site (NYC)', 
+                           'current_therapy'='Current Therapy',
+                           'current_medication'='Current Medication'),
+
+      continuous = ifelse(variable_category == 'Psychopathology', '*', ''),
+      name = ifelse(variable_category %in% c('Service', 'SITBI', 'Psychopathology'), paste0(name, continuous), name))
+
+cox_coef_plot = cox_coefs %>%
+  ggplot(data = ., aes(x= name, y = estimate)) +
+  geom_point(position = position_dodge(0.4)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.4)) +
+  coord_flip() +
+  labs(x = 'Baseline Predictor of Dropout', 
+       y = 'Hazard ratio for time to dropout from smartphone data acquisition\nDropout defined as first day of first 30+ day period with no smartphone data') +
+  geom_hline(yintercept = 1, lty = 2) +
+  scale_y_log10() +
+  scale_x_discrete(limits = rev) +
+  facet_grid(rows = vars(variable_category), drop = TRUE, scales = 'free') +
+  theme(strip.text.y = element_blank()) 
+
+
+ggsave(cox_coef_plot, filename = '../../figures/supplement/cox_model_hazard_ratios.png', width = 8, height = 8)
+```
+
+
+## Survival plot for site
+```{r}
+
+cox_site = survival::coxph(survival::Surv(day_num, status) ~siteCUMC, data = times_in_study)
+
+site_fit = survival::survfit(cox_site, data = times_in_study, newdata = data.frame(siteCUMC=c(TRUE, FALSE)))
+
+
+survival_plot_site = ggsurvplot(site_fit, conf.int = TRUE, legend.title = 'Site',
+           legend.labs = c('NYC', 'Pittsburgh'),
+           ggtheme = theme_minimal())
+
+
+# png('../../figures/supplement/survival_plot_site.png', width = 600, height = 480, units = "px", pointsize = 20)
+# print(survival_plot_site)
+# dev.off()
+
+ggsave(survival_plot_site$plot, filename= '../../figures/supplement/survival_plot_site.png')
+```

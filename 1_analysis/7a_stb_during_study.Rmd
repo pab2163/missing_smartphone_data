@@ -1,0 +1,376 @@
+---
+title: "stb_during_study"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+source('model_wrapper_functions.R')
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6) %>%
+    mutate(no_passive = ifelse(missing_gps == 1 & missing_accel == 1 & missing_keyboard == 1, 1, 0))
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+```
+
+# Load and Clean STB Report Data 
+```{r}
+stb_report = readxl::read_xlsx('../../../../../Suicidality_Report/MAPS_Suicidality_Report_2.17.23/AB_Checking_MAPS_suicidality_report.xlsx')
+
+events = dplyr::select(stb_report, ID=ptid, event_type=event, date = start, everything()) %>%
+  dplyr::filter(Origin != 'MISTAKE' | is.na(Origin)) %>%
+  mutate(ID = as.character(ID),
+         length_days = as.numeric(as.Date(end) - as.Date(date)),
+         length_days = ifelse(is.na(length_days), 1, length_days)) %>%
+  # remove events lasting more than 2 months
+  dplyr::filter(!length_days > 60) %>%
+  unique() %>%
+  # 2 categories of events, #2 is more inclusive -- plan + ema trigger
+  mutate(event_cat1 = ifelse(event_type %in% c('aborted', 'attempt', 'interrupted','ER - suicidality', 'hospitalization - suicidality'), 1, 0),
+         # event cat 1 can include EMA trigger attempt if confirmed by SITBI
+         event_cat1 = ifelse(event_type == 'ema trigger' & grepl('attempt', note) & `Confirmed by SITBI?`=='y' &
+                               !is.na(`Confirmed by SITBI?`), 1,event_cat1),
+         event_cat2 = ifelse(event_cat1==1 | event_type %in% c('plan', 'ema trigger'), 1, 0)) %>%
+  # group by person-days because there might be multiple events coded in a day
+  group_by(ID, date) %>%
+  summarise(event_cat1 = ifelse(sum(event_cat1) >=1, 1, 0), 
+            event_cat2 = ifelse(sum(event_cat2) >=1, 1, 0))
+
+
+participants_events = events %>%
+  group_by(ID) %>%
+  summarise(event_cat1 = ifelse(sum(event_cat1)>=1, 1, 0),
+            event_cat2 = ifelse(sum(event_cat2)>=1, 1, 0)) 
+
+```
+# Merge participant-level STB events with daily
+
+```{r}
+# merge events to daily dataframe
+daily = left_join(daily, participants_events, by = c('ID'))
+
+# any person-days not included in the events frame will be treated as NA. Assume no events on these days and fill with 0
+daily = mutate(daily, 
+               event_cat1_participant = ifelse(is.na(event_cat1), 0, event_cat1),
+               event_cat2_participant = ifelse(is.na(event_cat2), 0, event_cat2))
+
+
+daily_event_summary = daily %>%
+  group_by(ID, event_cat1_participant, event_cat2_participant) %>%
+  count()
+
+
+sum(daily_event_summary$event_cat1_participant)
+sum(daily_event_summary$event_cat2_participant)
+
+```
+
+# Model formulas
+```{r}
+sociodemographic_predictors = sociodemographic_predictors[! sociodemographic_predictors %in% 
+                                                                 c('White', 'interview_date_numeric')]
+
+event_cat1_formula = as.formula(paste('value ~ event_cat1_participant + (1|ID)'))
+event_cat2_formula = as.formula(paste('value ~ event_cat2_participant + (1|ID)'))
+
+event_cat1_formula_nopassive = as.formula(paste('value ~ event_cat1_participant + no_passive + (1|ID)'))
+
+event_cat1_formula_sociodem = as.formula(paste('value ~ event_cat1_participant + ', 
+                                     paste(sociodemographic_predictors, collapse = '+'), ' + (1|ID)'))
+event_cat2_formula_sociodem = as.formula(paste('value ~ event_cat2_participant + ', 
+                                     paste(sociodemographic_predictors, collapse = '+'), ' + (1|ID)'))
+
+event_cat1_formula_within = as.formula(paste('value ~ event_cat1_participant + weekend + personal_time_z + summerbreak + (1|ID)'))
+event_cat2_formula_within = as.formula(paste('value ~ event_cat2_participant + weekend + personal_time_z + summerbreak + (1|ID)'))
+
+
+event_cat1_formula_within_risk = as.formula(paste('value ~ event_cat1_participant + personal_time_z + summerbreak + (1|ID)'))
+event_cat2_formula_within_risk = as.formula(paste('value ~ event_cat2_participant + personal_time_z + summerbreak + (1|ID)'))
+```
+
+
+# Daily models based on suicide events
+```{r}
+iter = 4000
+event_cat1_daily_models = daily %>%
+  pivot_longer(contains('missing')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = event_cat1_formula, 
+                                               family = bernoulli(link = 'logit'), 
+                                             cores = 4, chains = 4, iter = iter, seed = 11291993,
+                                             prior = beta_prior)),
+           coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         modeltype = 'No Covariates')
+
+event_cat1_daily_models_sociodem = daily %>%
+  pivot_longer(contains('missing')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = event_cat1_formula_sociodem, 
+                                               family = bernoulli(link = 'logit'), 
+                                             cores = 4, chains = 4, iter = iter, seed = 11291993,
+                                             prior = beta_prior)),
+           coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+          rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         modeltype = 'Including Sociodemographic Covariates')
+```
+
+```{r}
+event_cat1_daily_models_within = daily %>%
+  pivot_longer(contains('missing')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = event_cat1_formula_within, 
+                                               family = bernoulli(link = 'logit'), 
+                                             cores = 4, chains = 4, iter = iter, seed = 11291993,
+                                             prior = beta_prior)),
+           coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         modeltype = 'Including Time-Varying Covariates')
+
+event_cat1_daily_models_no_passive = daily %>%
+  pivot_longer(contains('missing_daily')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = event_cat1_formula_nopassive, 
+                                               family = bernoulli(link = 'logit'), 
+                                             cores = 4, chains = 4, iter = iter, seed = 11291993,
+                                             prior = beta_prior)),
+           coef = purrr::map(model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                               exp(.) %>%
+                               as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.))),
+         modeltype = 'Adjusting for Days With No Smartphone Sensor Data')
+
+
+
+event_cat1_all_models = rbind(event_cat1_daily_models, event_cat1_daily_models_sociodem, event_cat1_daily_models_within, event_cat1_daily_models_no_passive)
+```
+
+# Clean data for weekly SI models
+
+```{r}
+# merge events to daily dataframe
+risk_missing = left_join(risk_missing, participants_events, by = c('ID'))
+
+# any person-days not included in the events frame will be treated as NA. Assume no events on these days and fill with 0
+risk_missing = mutate(risk_missing, 
+               event_cat1_participant = ifelse(is.na(event_cat1), 0, event_cat1),
+               event_cat2_participant = ifelse(is.na(event_cat2), 0, event_cat2))
+
+risk_missing = mutate(risk_missing, value = risk_missing)
+
+risk_missing = left_join(risk_missing, dplyr::select(daily, no_passive, ID, week=date), by = c('ID', 'week'))
+
+```
+
+# Weekly SI models
+
+```{r}
+risk_missing_cat1_model = brms::brm(data = risk_missing, formula = event_cat1_formula, family = bernoulli(link = 'logit'), 
+                                      cores = 4, chains = 4, iter = iter, seed = 11291993, prior = beta_prior)
+risk_missing_cat1_model_sociodem = brms::brm(data = risk_missing, formula = event_cat1_formula_sociodem, family = bernoulli(link = 'logit'), 
+                                      cores = 4, chains = 4, iter = iter, seed = 11291993, prior = beta_prior)
+risk_missing_cat1_model_within = brms::brm(data = risk_missing, formula = event_cat1_formula_within_risk, family = bernoulli(link = 'logit'), 
+                                      cores = 4, chains = 4, iter = iter, seed = 11291993, prior = beta_prior)
+risk_missing_cat1_model_nopassive = brms::brm(data = risk_missing, formula = event_cat1_formula_nopassive, family = bernoulli(link = 'logit'), 
+                                      cores = 4, chains = 4, iter = iter, seed = 11291993, prior = beta_prior)
+```
+
+# Save model outputs 
+
+```{r}
+save(event_cat1_all_models, 
+     risk_missing_cat1_model, 
+     risk_missing_cat1_model_sociodem,
+     risk_missing_cat1_model_within,
+     risk_missing_cat1_model_nopassive,
+     file = 'model_outputs/stb_during_study_models.rda')
+```
+
+
+# Pull OR from weekly models
+```{r}
+risk_missing_cat1_or = fixef(risk_missing_cat1_model, probs =c(0.025, 0.975)) %>% exp() %>% as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.),
+                                                modeltype = 'No Covariates', name = 'Weekly SI Survey')
+
+risk_missing_cat1_or_sociodem = fixef(risk_missing_cat1_model_sociodem, probs =c(0.025, 0.975)) %>% exp() %>% as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.),
+                                                modeltype = 'Including Sociodemographic Covariates', name = 'Weekly SI Survey')
+
+risk_missing_cat1_or_within = fixef(risk_missing_cat1_model_within, probs =c(0.025, 0.975)) %>% exp() %>% as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.),
+                                                modeltype = 'Including Time-Varying Covariates', name = 'Weekly SI Survey')
+
+risk_missing_cat1_or_nopassive = fixef(risk_missing_cat1_model_nopassive, probs =c(0.025, 0.975)) %>% exp() %>% as.data.frame(.) %>%
+                               rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.),
+                                                modeltype = 'Adjusting for Days With No Smartphone Sensor Data', name = 'Weekly SI Survey')
+
+risk_missing_cat1_or_all = rbind(risk_missing_cat1_or, risk_missing_cat1_or_within, risk_missing_cat1_or_sociodem, risk_missing_cat1_or_nopassive)
+
+```
+
+# Clean up OR and make plot
+
+```{r}
+event_cat1_daily_or = event_cat1_all_models %>%
+    unnest(coef) %>%
+    dplyr::select(-model, -data)
+
+
+event_cat1_or = rbind(event_cat1_daily_or, risk_missing_cat1_or_all) %>%
+  mutate(name = dplyr::recode(name,
+  'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+stb_missing_data_plot = event_cat1_or %>%
+  dplyr::filter(term == 'event_cat1_participant') %>%
+  ggplot(data = ., aes(x = name, y = estimate, color = modeltype)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  geom_point(position = position_dodge(0.2)) + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2)) +
+  coord_flip() +
+  scale_y_log10() +
+  labs(y = 'Odds Ratio for Probability of Missing Data\nParticipants with 1+ Suicidal Events > Participants With 0 Suicidal Events During Study Period',
+       color = 'Model Specification',
+       x = 'Missing Data Modality',
+       subtitle = 'No Significant Differences in Missing Data For Participants With vs. Without Suicidal Events During Study Period') +
+  theme_bw() +
+  scale_color_viridis_d()
+
+
+ggsave(stb_missing_data_plot, filename = '../../figures/supplement/stb_during_study_period_or.png', width = 9, height = 5)
+```
+
+```{r}
+summary(risk_missing_cat1_model_sociodem)
+```
+
+# Summary Boxplot
+```{r}
+by_event = daily %>%
+  group_by(ID, event_cat1_participant) %>%
+  summarise(prop_missing_daily = sum(missing_daily)/n(),
+            prop_missing_gps = sum(missing_gps)/n(),
+            prop_missing_keyboard = sum(missing_keyboard)/n(),
+            prop_missing_accel = sum(missing_accel)/n()) %>%
+  mutate(event_cat1_label = ifelse(event_cat1_participant==1, '1+ Events', 'No Events'))
+
+by_event_risk = risk_missing %>%
+  group_by(ID, event_cat1_participant) %>%
+  summarise(prop_missing_risk = sum(risk_missing)/n())%>%
+  mutate(event_cat1_label = ifelse(event_cat1_participant==1, '1+ Events', 'No Events'))
+ 
+
+by_event_all = left_join(by_event, by_event_risk, by = c('ID', 'event_cat1_participant', 'event_cat1_label'))
+```
+
+
+```{r}
+pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+
+suicidal_behavior_missingngess = by_event_all %>%
+  pivot_longer(contains('prop')) %>%
+  dplyr::mutate(name = dplyr::recode(name, 'prop_missing_daily'='Daily Mood Survey', 'prop_missing_gps'='GPS', 'prop_missing_risk'='Weekly SI Survey',
+                                           'prop_missing_keyboard'='Keyboard Input', 'prop_missing_accel'='Accelerometer')) %>%
+  ggplot(aes(x = event_cat1_label, y = value*100, fill = name)) +
+  gghalves::geom_half_violin(position = position_nudge(-0.15), alpha = 0.4) + 
+  geom_boxplot(width = 0.05, position = position_nudge(-0.1), outlier.shape = NA, alpha = 0.4) +
+  geom_jitter(width = 0.05, alpha = 0.3) +
+  theme_bw() +
+  labs(y = '% Observations Mising', x = 'Participants With 1+ Suicidal Events Versus No Suicidal Events During the Study Period') +
+  theme(legend.position = 'none') +
+  facet_grid(~name) +
+  #scale_fill_viridis_d(end = 0.8) +
+  scale_fill_manual(values= c(
+      "Accelerometer" = pal2[1], 
+      "Daily Mood Survey" = pal2[2], 
+      "GPS" = pal2[3], 
+      "Keyboard Input" = pal2[4], 
+      "Weekly SI Survey" = pal2[5]
+    ),
+    limits= c(
+      "Keyboard Input", 
+      "GPS", 
+      "Accelerometer",
+      "Weekly SI Survey",
+      "Daily Mood Survey"
+    ))
+
+
+
+
+ggsave(suicidal_behavior_missingngess, file = '../../figures/supplement/boxplot_stb_during_study_vis.png', height = 3, width = 9)
+```
+
+
+```{r}
+event_lm = by_event_all %>%
+  pivot_longer(contains('prop')) %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~lm(data =., value ~ event_cat1_label)),
+         coef = purrr::map(model, ~broom::tidy(.))) %>%
+  unnest(coef)
+
+
+
+event_lm %>%
+  dplyr::filter()
+```
