@@ -1,0 +1,310 @@
+---
+title: "Compile Daily Dataset"
+output: html_document
+date: "2022-10-07"
+---
+
+# Overview
+
+* For daily mood & all passive smartphone variables (GPS, Accelerometer, Keyboard Input), put together a dataset for all *possible* days when observations could have been recorded (from each participant's start to end date)
+* Clean up self-report and interview measures at study visits for incorporation as well
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(scales)
+library(naniar)
+library(cowplot)
+theme_set(theme_bw())
+```
+
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/daily_data.rda')
+DAILYdata$ID= as.character(DAILYdata$ID)
+
+# code site
+DAILYdata = mutate(DAILYdata, site = ifelse(startsWith(ID, '1'), 'CUIMC', 'PITT'))
+
+# filter out non-dates
+DAILYdata = dplyr::filter(DAILYdata, !is.na(date))
+
+# Plot times of completing daily surveys
+ggplot(DAILYdata, aes(x = time_completed)) +
+  geom_histogram(bins = 100) +
+  scale_x_time(breaks = date_breaks('60 mins'))
+```
+
+# Load passive data missingness files
+```{r}
+load('../../cleaned_data/gps_data_missingness.rda') 
+load('../../cleaned_data/accel_data_missingness.rda')
+load('../../cleaned_data/keyboard_data_missingness.rda')
+
+combined_gps = combined_gps %>%
+  dplyr::select(ID, date = dt_feature, n_capture_day, contains('amt'))
+
+combined_accel = combined_accel %>%
+  dplyr::select(ID, date = dt_feature, val_sleep_duration_min)
+
+combined_keyboard = combined_keyboard %>%
+  dplyr::select(ID, date = dt_feature, everything())
+```
+
+
+# Pull data together
+
+## Calculate start and end dates for each participant
+```{r}
+dates = read_csv('../../../../Wrangling/MAPS_StartEnd_Dates/maps_startend_dates_2.13.2023.csv') %>%
+  mutate(ID = as.character(ID)) %>%
+  dplyr::select(ID, participant_start_date = start_date, participant_end_date = end_date, TIMEPNT)
+```
+
+
+## Make grid of all possible days each participant could have responded to the `daily` prompt, from when they started to when they finished (should be a roughly 6-month period, with variability due to scheduling of visits)
+
+Then join the daily data to that grid
+```{r}
+date_grid = expand.grid(ID = unique(DAILYdata$ID),
+                        date = min(DAILYdata$date):max(DAILYdata$date)) %>%
+  mutate(date = as.Date(date, origin = '1970-01-01'))
+
+daily = left_join(date_grid, DAILYdata, by = c('ID', 'date')) %>%
+  left_join(., dates, by = c('ID')) %>%
+  dplyr::filter(!is.na(participant_start_date), 
+                !is.na(participant_end_date), 
+                date >= participant_start_date,
+                date <= participant_end_date) %>%
+  dplyr::mutate(missing_daily = ifelse(is.na(daily), 1, 0),
+                day_num = as.numeric(date - participant_start_date), # days since start of participation for each participant
+                personal_time_z = scale(day_num, center = TRUE, scale = TRUE), # scaled time since start for each participant
+                site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+                siteCUMC = site == 'CUIMC') 
+
+# time variables
+daily$dayofweek <- weekdays(daily$date)
+daily$weekend <- ifelse(daily$dayofweek == "Saturday" | daily$dayofweek =="Sunday",1,0)
+daily$month <- as.numeric(format(daily$date,"%m"))
+daily$summerbreak <- as.factor(ifelse(daily$month == 7 | daily$month == 8,1,0))
+```
+
+
+## Add GPS variables to daily
+```{r}
+daily = left_join(daily, combined_gps, by = c('ID', 'date')) 
+daily = left_join(daily, combined_accel, by = c('ID', 'date')) 
+daily = left_join(daily, combined_keyboard, by = c('ID', 'date')) 
+
+daily = mutate(daily, missing_gps = is.na(n_capture_day),
+                      missing_accel = is.na(val_sleep_duration_min),
+                      missing_keyboard = is.na(n_char_day))
+```
+
+
+# Bring in self-report data
+
+Vectors of clinical & sociodemographic predictors
+
+```{r}
+clinical_predictors_continuous = c('SHAPS_TOT_r_i', 'MFQ_i',
+                 'SCARED_i', 'SSI19_i', 'INQ_burdenensomeness_i', 'INQ_thwartedbelonging_i',  'comorbidity_current')
+
+clinical_predictors_binary = c('current_medication', 'current_therapy', 'hospitalization_pastyear', 'visit_er_pastyear',
+                               'SITBI_SB_ever', 'SITBI_sa_ever','SITBI_engaged_nssi_ever', 'SITBI_si_ever')
+
+clinical_predictors = c(clinical_predictors_binary, clinical_predictors_continuous)
+
+sociodemographic_predictors = c('interview_age_years', 'iPhone', 'Asian', 'White', 'Black', 'hispanic', 'sexM', 'siteCUMC', 'interview_date_numeric')
+
+all_predictors = c(clinical_predictors, sociodemographic_predictors, 'ID')
+```
+
+## Load from self-report 
+
+```{r}
+load('../../../../Wrangling/Self_Report/data/self_report_03_28_2023.Rda')
+
+# select baseline variables
+self_report_baseline = dplyr::select(selfreport, ID, cisgender, cishet, parentscollege, interview_date, 
+                                     sex, White, Black, Asian, Multiracial, hispanic, psqitotal, comorbidity_current,
+                                     income_ordinal, income, income_categorical,income_ordinal,
+                                     heterosexual, group, interview_age_years=age, gender, GENDER,
+                                     StressCT, StressTH, DiffCT, EvntTH, EvntCT, DiffTH,RecTotCT, RecTotTH,
+                                     iPhone, ends_with('_i'), MDEcurrent, MDDcurrent, AnxietyCurrent, SADcurrent, GADcurrent, SUDever, Control, -psqi_1_i, -psqi_3_i, contains('sitbi')) %>%
+  mutate(sexM = sex =='M',
+         interview_date_numeric = interview_date - min(interview_date, na.rm=TRUE),
+         interview_date_numeric = scale(interview_date_numeric))
+
+```
+
+## Pull in phone type information (separate for Pitt/CUMC Participants)
+
+Pitt file also has missing interview date information for some participants
+```{r}
+phone_type_dates_pitt = openxlsx::read.xlsx('../../../../../For_Paul/qry_Bloom_20230424.xlsx', detectDates = TRUE)
+phone_type_pitt = mutate(phone_type_dates_pitt, iPhone_update = ifelse(PhoneType=='iPhone', 1, 0),
+                               PTID = as.character(PTID),
+                         interview_date = as.Date(interview_date)) %>%
+  dplyr::filter(TIMEPNT==0) %>%
+  dplyr::select(ID=PTID, iPhone_update, interview_date_pitt=interview_date)
+
+phone_type_cumc = openxlsx::read.xlsx('../../../../../For_Paul/ID_PhoneType_CUMC_4.3.23.xlsx', detectDates = TRUE) %>%
+  mutate(., iPhone_update = ifelse(`Type.of.Phone`=='iPhone', 1, 0),
+         ID = as.character(ID)) %>%
+  dplyr::select(ID, iPhone_update) %>%
+  mutate(interview_date_pitt = NA)
+
+iphone_update = rbind(phone_type_pitt, phone_type_cumc)
+
+
+self_report_baseline = left_join(self_report_baseline, iphone_update, by = 'ID')
+self_report_baseline = mutate(self_report_baseline, iPhone = coalesce(iPhone, iPhone_update),
+                              interview_date = coalesce(interview_date, interview_date_pitt)) %>%
+  dplyr::select(-iPhone_update, interview_date_pitt)
+
+```
+
+6 month follow-up data
+
+```{r}
+self_report_6 = dplyr::select(selfreport, iPhone, White, Black, hispanic, sex, Asian,
+                               ID, RACE, interview_age_years=age, GENDER, MFQ_6, SSI19_6, SHAPS_TOT_r_6, SCARED_6,
+                               INQ_burdenensomeness_6, INQ_thwartedbelonging_6,
+                               MFQ_i, SSI19_i, SHAPS_TOT_r_i, SCARED_i, INQ_burdenensomeness_i, INQ_thwartedbelonging_i) %>%
+  # change from baseline
+  mutate(MFQ_change = MFQ_6- MFQ_i,
+         SSI19_change = SSI19_6- SSI19_i,
+         SHAPS_TOT_r_change = SHAPS_TOT_r_6- SHAPS_TOT_r_i,
+         SCARED_change = SCARED_6- SCARED_i,
+         INQ_burdenensomeness_change = INQ_burdenensomeness_6- INQ_burdenensomeness_i,
+         INQ_thwartedbelonging_change = INQ_thwartedbelonging_6- INQ_thwartedbelonging_i,
+         sexM = sex=='M',
+         siteCUMC = startsWith('1', ID))
+
+```
+
+Long data
+
+```{r}
+selfreport_long = dplyr::select(selfreport_long, month, interview_date = SelfReportDate, iPhone, White, Black, hispanic, sex, Asian,
+                               ID, RACE, interview_age_years=age, GENDER, MFQ, SSI19, SHAPS_TOT_r, SCARED,
+                               INQ_burdenensomeness, INQ_thwartedbelonging) %>%
+  mutate(sexM = sex=='M',
+         siteCUMC = startsWith('1', ID))
+
+# pull in missing dates from baseline interviews
+selfreport_long = self_report_baseline %>%
+  dplyr::select(ID, interview_date_replace = interview_date) %>%
+  mutate(month = 0) %>%
+  left_join(selfreport_long, ., by = c('ID', 'month'))  %>%
+  mutate(interview_date = coalesce(interview_date, interview_date_replace))
+
+# check date ranges visually
+ggplot(selfreport_long, aes(x = interview_date, y = ID, color = factor(month))) +
+  geom_point()
+
+```
+
+Bring in service use data
+
+```{r}
+service_use_cumc = qualtRics::read_survey('../../../../../Qualtrics_Data/Baseline/Service_Use/MAPS Service Use Baseline_November 30, 2022_13.02.csv') %>%
+  dplyr::select(ID=ID_1_i...18, current_medication = serviceuse_1_i, current_therapy = serviceuse_2_i, 
+                hospitalization_pastyear = serviceuse_3_i, visit_er_pastyear = serviceuse_9_i)
+
+service_use_pitt = openxlsx::read.xlsx('../../../../../Pitt_Data/PITT - NDA Jan2023/Baseline/PITT Baseline Service Use.xlsx') %>%
+  dplyr::select(ID=18, current_medication = serviceuse_1_i, current_therapy = serviceuse_2_i, 
+                hospitalization_pastyear = serviceuse_3_i, visit_er_pastyear = serviceuse_9_i)
+
+service_use = rbind(service_use_cumc, service_use_pitt)
+
+# Join service use and self-report data
+self_report_baseline = left_join(self_report_baseline, service_use, by = 'ID')
+```
+
+
+```{r}
+# Scale continuous clinical predictors
+self_report_baseline = self_report_baseline %>%
+  mutate(across(all_of(clinical_predictors_continuous), scale))
+
+# male gender in contrast to all other genders
+self_report_baseline = mutate(self_report_baseline, genderM= GENDER == 'M')
+```
+
+```{r}
+save(daily, file = '../../cleaned_data/cleaned_data_for_daily_models.rda')
+save(self_report_baseline, clinical_predictors, sociodemographic_predictors, all_predictors, strain_predictors,
+     self_report_6, selfreport_long,
+     file = '../../cleaned_data/cleaned_baseline_data.rda')
+```
+
+
+# Make Figure 1 (Descriptive Plots of Daily Mood & Passive Smartphone Measure Missingness)
+
+```{r}
+# Panel A
+descriptive_timeline_plot_data = daily  %>%
+  mutate(missing_all_passive = missing_gps + missing_accel + missing_keyboard == 3, TRUE, FALSE) %>%
+  group_by(ID) %>%
+  mutate(pct_missing_daily = sum(missing_daily)/n(),
+         pct_missing_gps = sum(missing_gps)/n(),
+         pct_missing_accel = sum(missing_accel)/n(),
+         pct_missing_keyboard = sum(missing_keyboard)/n())%>%
+  ungroup() %>%
+  # Up to day 200 for pariticipants who have completed all visit timepoints
+  dplyr::filter(TIMEPNT == 6, day_num <= 180) 
+
+descriptive_timeline_plot_mood = descriptive_timeline_plot_data %>%
+  mutate(missing_daily = dplyr::recode(missing_daily, '1'='Missing', '0'='Observed')) %>%
+  ggplot(aes(x = day_num, y = fct_reorder(.f = ID, .x = pct_missing_daily))) +
+  geom_tile(aes(fill = missing_daily)) +
+  geom_point(data = dplyr::filter(descriptive_timeline_plot_data, missing_all_passive==TRUE), 
+             color = 'black', shape = 4, size = 0.5, aes(color = missing_all_passive, shape ='hi'), alpha = 0.5) + 
+  labs(x = 'Number of days from baseline\nx indicates days with no passive sensor measurements', 
+       y = 'Participants', 
+       fill = 'Missingness of Daily Mood Survey',
+       color = 'Missingness of Daily Mood Survey', title = 'A: Overall Missingness Patterns', subtitle ='Daily mood surveys') +
+  theme(axis.text.y = element_blank(), legend.position = 'bottom') +
+  scale_x_continuous(expand = c(0, 0), limits = c(0,180))
+
+
+# Panel B
+daily = mutate(daily,  missing_all_passive = missing_gps + missing_accel + missing_keyboard == 3, TRUE, FALSE)
+daily_totaln = nrow(daily)
+
+
+passive_daily_pattern_data = daily %>%
+  ungroup() %>%
+  mutate(totaln = daily_totaln) %>%
+  group_by(missing_daily, missing_all_passive) %>%
+  summarise(n = n()) %>%
+  mutate(pct = n/daily_totaln) %>%
+  mutate(category = case_when(
+    missing_daily ==0 & missing_all_passive ~ 'All Passive Missing\nDaily Mood Observed',
+    missing_daily==1 & missing_all_passive ~ 'Both Missing',
+    missing_daily==0 & !missing_all_passive ~ 'Both Observed',
+    missing_daily==1 & !missing_all_passive ~ 'Passive Observed\nDaily Mood Missing',
+  ))
+
+
+passive_daily_summary_plot = passive_daily_pattern_data %>%
+  ggplot(data = ., aes(x = fct_reorder(.f = category, .x = n), y = n)) +
+  geom_bar(stat = 'identity') +
+  geom_label(aes(label = round(pct, 3))) + 
+  coord_flip() +
+  labs(x = '', y = 'total # of observations', title = 'B: Co-occurrance of missingness', subtitle = 'Daily mood surveys & passive sensor data') +
+  theme(axis.text.y=element_text(angle=45, hjust=1)) +
+  ylim(0, max(passive_daily_pattern_data$n) + 370)
+
+descriptive_fig=cowplot::plot_grid(descriptive_timeline_plot_mood, passive_daily_summary_plot, rel_widths = c(1.8, 1), align = 'h', axis = 'bt')
+cowplot::save_plot(descriptive_fig, base_height = 6, base_width = 13, filename = '../../figures/fig1.1_descriptive_missingness.png')
+
+```

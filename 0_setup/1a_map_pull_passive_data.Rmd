@@ -1,0 +1,96 @@
+---
+title: "Pull Passive Smartphone Data Files"
+output: html_document
+date: "2022-10-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(testit)
+```
+
+# Overview
+
+This pulls individual-specific EARS derivative files into one large dataframe for each modality (GPS, accelerometer, keyboard input). Output aggregated files are saved to `../../cleaned_data/`
+
+# GPS
+
+```{r}
+# glob allfiles into a vector
+geo_files = Sys.glob('/Volumes/AUERBACHLAB/Columbia/MAPS_Data/EARS_Features/GPS/*/GPS_day*')
+
+# little function to pull the participant ID from the file path to the  file
+get_id = function(path){ 
+  id = stringr::str_split(path, pattern = '/')[[1]][8] %>% 
+    as.character()
+  return(id)
+}
+
+# get a vector of ids
+ids = sapply(geo_files, get_id)
+
+# check that length of id vector matches length of files vector
+assert('IDs vector length matches risk file path vector length', length(ids) == length(geo_files))
+
+# pull all files into 1 dataframe (long), and label with IDs
+combined_gps = geo_files %>% 
+  map_dfr(read_csv, .id = 'source') %>%
+  mutate(ID = ids[as.numeric(source)])
+
+duplicate_day_check = combined_gps %>%
+  group_by(ID, dt_feature) %>%
+  count()
+
+combined_gps = combined_gps %>% distinct(., dt_feature, ID, .keep_all = TRUE)
+save(combined_gps, file = '../../cleaned_data/gps_data_missingness.rda')
+```
+
+## Accelerometer
+
+```{r}
+accel_files = Sys.glob('/Volumes/AUERBACHLAB/Columbia/MAPS_Data/EARS_Features/ACCEL/*/ACCEL_day_sleep_converted*')
+accel_ids = sapply(accel_files, get_id)
+
+# pull all files into 1 dataframe (long), and label with IDs
+combined_accel = accel_files %>% 
+  map_dfr(read_csv, .id = 'source', col_types = cols(dt_feature = col_date(),
+                                                     tm_sleep_start = col_datetime(),
+                                                     tm_sleep_stop = col_datetime(),
+                                                     val_sleep_duration_min = col_character())) %>%
+  mutate(ID = accel_ids[as.numeric(source)])
+
+accel_duplicate_day_check = combined_accel %>%
+  group_by(ID, dt_feature) %>%
+  count()
+
+combined_accel = combined_accel %>% distinct(., dt_feature, ID, .keep_all = TRUE)
+
+save(combined_accel, file = '../../cleaned_data/accel_data_missingness.rda')
+```
+
+## Keyboard Input
+
+```{r}
+keyboard_files = Sys.glob('/Volumes/AUERBACHLAB/Columbia/MAPS_Data/EARS_Features/KeyInput/*/KeyInput*.csv')
+keyboard_ids = sapply(keyboard_files, get_id)
+
+# pull all files into 1 dataframe (long), and label with IDs
+combined_keyboard = keyboard_files %>% 
+  map_dfr(read_csv, .id = 'source') %>%
+  mutate(ID = keyboard_ids[as.numeric(source)])
+
+keyboard_duplicate_day_check = combined_keyboard %>%
+  group_by(ID, dt_feature) %>%
+  count()
+
+# Remove rows where subid is missing
+combined_keyboard = combined_keyboard %>% distinct(., dt_feature, ID, .keep_all = TRUE) %>%
+  dplyr::filter(!is.na(ID))
+
+save(combined_keyboard, file = '../../cleaned_data/keyboard_data_missingness.rda')
+
+```

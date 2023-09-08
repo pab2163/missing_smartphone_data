@@ -1,0 +1,134 @@
+---
+title: "Consistency & Reliability"
+output: html_document
+date: "2022-10-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(scales)
+library(naniar)
+library(cowplot)
+library(psych)
+library(lme4)
+library(ggplot2)
+```
+
+
+# Load daily data
+
+```{r}
+load('../../../../Wrangling/Self_Report/data/self_report_07_19_2023.Rda')
+```
+
+
+# Alpha (Internal Consistency)
+
+## MFQ
+```{r}
+mfq_alpha = selfreport_itemwise %>%
+  dplyr::select((starts_with('mfq') & ends_with('_i'))) %>%
+  psych::alpha(., n.iter=1000)
+
+summary(mfq_alpha)
+mfq_alpha$boot.ci
+```
+
+
+## SCARED
+```{r}
+scared_alpha = selfreport_itemwise %>%
+  dplyr::select((starts_with('scared') & ends_with('_i'))) %>%
+  psych::alpha(., n.iter=1000)
+
+summary(scared_alpha)
+scared_alpha$boot.ci
+```
+
+## SHAPS
+```{r}
+shaps_alpha = selfreport_itemwise %>%
+  dplyr::select((starts_with('shaps') & ends_with('_i'))) %>%
+  psych::alpha(., n.iter=1000)
+
+summary(shaps_alpha)
+shaps_alpha$boot.ci
+```
+
+## SSI
+```{r}
+ssi_alpha = selfreport_itemwise %>%
+  dplyr::select((starts_with('ssi') & ends_with('_i')), -ssi_20_i, -ssi_21_i) %>%
+  dplyr::filter(!is.na(ssi_1_i), 
+                !is.na(ssi_2_i),
+                !is.na(ssi_3_i),
+                !is.na(ssi_4_i),
+                !is.na(ssi_5_i))
+
+
+ssi_alpha[is.na(ssi_alpha)] = 0
+  
+  
+ssi_alpha = psych::alpha(ssi_alpha, n.iter=1000)
+
+summary(ssi_alpha)
+ssi_alpha$boot.ci
+```
+
+## INQ
+
+Item coding:
+* Burdensomeness: 1-6
+* Thwarted Belongingness: 9, 11, 12 + reverse(7, 8 ,10, 13, 14, 15)
+```{r}
+percieved_burdensomeness_alpha = selfreport_itemwise %>%
+  dplyr::select("inq_1_i" , "inq_2_i" , "inq_3_i" , "inq_4_i" , "inq_5_i" , "inq_6_i")
+  
+percieved_burdensomeness_alpha = percieved_burdensomeness_alpha %>%
+  psych::alpha(., n.iter=1000)
+
+
+summary(percieved_burdensomeness_alpha)
+percieved_burdensomeness_alpha$boot.ci
+```
+
+
+```{r}
+thwarted_belongingness_alpha = selfreport_itemwise %>%
+  dplyr::select("inq_7_i" , "inq_8_i" , "inq_9_i" , "inq_10_i" , "inq_11_i" , "inq_12_i", "inq_13_i", "inq_14_i", "inq_15_i")
+  
+thwarted_belongingness_alpha = thwarted_belongingness_alpha %>%
+  psych::alpha(., keys = c('inq_7_i', 'inq_8_i', "inq_10_i", "inq_13_i", "inq_14_i", "inq_15_i"),
+               n.iter=1000)
+
+summary(thwarted_belongingness_alpha)
+thwarted_belongingness_alpha$boot.ci
+```
+
+# ICC
+
+
+```{r}
+mfq_icc = lmer(data = selfreport_long, MFQ ~ month + (1|ID))
+sjPlot::tab_model(mfq_icc)
+
+scared_icc = lmer(data = selfreport_long, SCARED ~ month + (1|ID))
+sjPlot::tab_model(scared_icc)
+
+shaps_icc = lmer(data = selfreport_long, SHAPS_TOT_r ~ month + (1|ID))
+sjPlot::tab_model(shaps_icc)
+
+ssi_icc = lmer(data = selfreport_long, SSI19 ~ month + (1|ID))
+sjPlot::tab_model(ssi_icc)
+
+thwarted_belongingness_icc = lmer(data = selfreport_long, INQ_thwartedbelonging ~ month + (1|ID))
+sjPlot::tab_model(thwarted_belongingness_icc)
+
+percieved_burdenensomeness_icc = lmer(data = selfreport_long, INQ_burdenensomeness ~ month + (1|ID))
+sjPlot::tab_model(percieved_burdenensomeness_icc)
+```
+

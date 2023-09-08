@@ -1,0 +1,195 @@
+---
+title: "0_Wrangling_sleep"
+author: "Jackie"
+date: "7/6/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+This script outputs cleaned daily and weekly sleep data
+
+# Libraries
+
+```{r, message=FALSE,warning=FALSE,echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(hms)
+library(naniar)
+```
+
+```{r}
+options(scipen = 999)
+```
+
+# Reading in data
+
+```{r}
+sleep_fp <- "/Volumes/AUERBACHLAB/Columbia/MAPS_Data/Ranqing/MAPS_Sleep/data/clean/motion_sleep_processed.csv" # Ranqing getting rid of the stationary criteria; will reprocess
+
+sleep <- 
+  read_csv(sleep_fp) %>%
+  mutate(
+    ID = factor(ID)
+  )
+```
+
+# Keeping only true sleep periods
+
+## Sleep Onset and Offset
+
+### Converting HMS to HM
+
+motion data sensors: accelerometry, ambient light, gyroscope
+
+```{r}
+sleep_hm_on <-
+  sleep %>%
+  mutate(
+    sleep_onset =
+      as_hms(sleep_start),
+    sleep_H =
+      hour(sleep_onset),
+    sleep_M =
+      minute(sleep_onset)
+  ) %>%
+  mutate(
+    onset_type = 
+      ifelse(sleep_H > 0 & sleep_H <= 2, "late", 
+             ifelse(sleep_H > 2 & sleep_H <= 6, "verylate",
+                    ifelse(sleep_H >6 & sleep_H <= 20, "abnormal",
+                           ifelse(sleep_H > 20 & sleep_H <= 21, "veryearly",
+                                  ifelse(sleep_H > 21 & sleep_H <= 22, "early",
+                                         ifelse(sleep_H == 23 | sleep_H == 0, "normal", NA)
+                                         )
+                                  )
+                           )
+                    )
+             )
+    ) 
+
+sleep_hm_off <-
+  sleep_hm_on %>%
+  mutate(
+    sleep_offset =
+      as_hms(sleep_end),
+    wake_H =
+      hour(sleep_offset),
+    wake_M =
+      minute(sleep_offset)
+  ) %>%
+  mutate(
+    offset_type = 
+      ifelse(wake_H == 10, "late", 
+             ifelse(wake_H > 10 & wake_H <= 12, "verylate",
+                    ifelse(wake_H > 12 & wake_H <= 15, "abnormal",
+                           ifelse(wake_H == 4 | wake_H == 5, "veryearly",
+                                  ifelse(wake_H == 6, "early",
+                                         ifelse(wake_H >= 7 & wake_H <= 9, "normal", NA)
+                                         )
+                                  )
+                           )
+                    )
+             )
+    )   
+
+# In adults, typical bedtimes are 22:00-10:00; so we are including 21:00-2:00 Onset time to 4:00-12:00 offset time given wide ranges of onset/offset for adolescents
+```
+
+## Labeling month
+
+```{r}
+sleep_hm_month <-
+  sleep_hm_off %>%
+  mutate(
+     month_label = lubridate::month(dt_feature, label = TRUE),
+     month_label = factor(month_label),
+     summer = 
+       ifelse(month_label == "Jul" | month_label == "Aug",
+              "summer",
+              "schoolyear"
+              ),
+     wday_name = lubridate::wday(dt_feature, label = TRUE)
+  )
+  
+```
+
+### Distribution of onset and offset types
+
+```{r}
+sleep_hm_month %>%
+  ggplot(
+    aes(x = sleep_H, fill = onset_type)
+  ) +
+  geom_histogram(stat="count") +
+  theme_classic()
+#ggsave("distribution_of_sleep_onset_all.png", width = 7, height = 6)
+
+sleep_hm_month %>%
+  ggplot(
+    aes(x = wake_H, fill = offset_type)
+  ) +
+  geom_histogram(stat="count") +
+  theme_classic()
+#ggsave("distribution_of_sleep_offset_all.png", width = 7, height = 6) 
+
+```
+
+## Discarding abnormal sleep and wake times
+
+```{r}
+sleep_hm_monthx <-
+  sleep_hm_month %>%
+  dplyr::mutate(
+    unlikelysleep = 
+      ifelse(onset_type == "abnormal" | offset_type == "abnormal" | is.na(offset_type), "drop", "keep") # 36 meet this criteria
+      ) %>%
+  filter(unlikelysleep == "keep")
+```
+
+## Creating sleep onset and offset variables
+
+```{r}
+# set midnight to zero, and then minutes from midnight/zero (e.g., 10pm would be -120)
+# if sleep onset is different date from sleep offset, then xx*60 - 24*60 
+sleep_hm_recode <-
+  sleep_hm_monthx %>%
+  mutate(
+    sleep_onset = lubridate::hms(sleep_onset),
+    sleep_onset_re = (sleep_H*60) + sleep_M,
+    sleep_onset_date = as.Date(sleep_start),
+    sleep_offset_date = as.Date(sleep_end),
+    sleep_offset_re = (wake_H*60) + wake_M,
+    sleep_onset_re2 =
+      ifelse(sleep_onset_date != sleep_offset_date, sleep_onset_re - (24*60), sleep_onset_re)
+    ) 
+```
+
+## Separating Free and School days
+
+```{r}
+daily_sleep_features <-
+  sleep_hm_recode %>%
+  dplyr::mutate(
+    night_type = 
+      ifelse(
+        wday_name == "Fri" | wday_name == "Sat", "free_night", "school_night"
+        )
+    ) %>%
+  dplyr::mutate(night_type = factor(night_type)) %>%
+  dplyr::select(c("ID", "dt_feature", "daily", "wday_name", "night_type", "summer", "amt_sleep_day_min", "sleep_onset_re2", "sleep_offset_re")) %>%
+  dplyr::group_by(night_type) %>%
+  dplyr::mutate(
+    sleep_duration = amt_sleep_day_min/60, # interval between bedtime (onset) and wake time (offset) in hours
+    sleep_on = sleep_onset_re2/60,
+    sleep_off = sleep_offset_re/60,
+    Midpoint_Roenne = sleep_on + (sleep_duration/2) # sleep_on_f + (sleep_duration_f/2) because "sleep_on" could refer to the time going to bed, or "lights off time" rather than physiological sleep onset, the midpoint of sleep time includes the effects of prolonged sleep latency, which is more suitable to represent delayed circadian rhythm (De Souza and Hidalgo, 2014;Naismith et al., 2014 ).
+    ) %>%
+  dplyr::select(-c("sleep_onset_re2", "sleep_offset_re", "amt_sleep_day_min")) 
+
+
+write.csv(daily_sleep_features, file = '../../cleaned_data/daily_sleep_jackie_cleaning.csv')
+```
+
