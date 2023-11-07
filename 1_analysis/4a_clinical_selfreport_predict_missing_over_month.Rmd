@@ -1,9 +1,11 @@
 ---
-title: "missing_daily_between"
+title: "Longitudinal analyses of whether changes in clinical self-report measures predicting missingness in the next 30 days"
 output: html_document
 date: "2022-08-23"
 ---
 
+
+# Longitudinal analyses of whether changes in clinical self-report measures predicting missingness in the next 30 days
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(Matrix)
@@ -15,7 +17,6 @@ library(broom.mixed)
 library(lmerTest)
 library(brms)
 source('model_wrapper_functions.R')
-#library(ggfortify)
 beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 theme_set(theme_bw())
 ```
@@ -27,8 +28,6 @@ theme_set(theme_bw())
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')
 ```
-
-
 
 ```{r}
 daily = dplyr::filter(daily, TIMEPNT==6, day_num <=200)
@@ -118,6 +117,8 @@ save(models_clinical_predict_month_missingness, coef_clinical_predict_month_miss
 load('model_outputs/clinical_predict_month_missingness.rda')
 ```
 
+
+# Plot model outputs (coefficients as these are linear regressions)
 ```{r}
 coef_clinical_predict_month_missingness_corrected = models_clinical_predict_month_missingness %>%
   mutate(coef = purrr::map(model, ~broom::tidy(., conf.level = conf_level_corrected))) %>%

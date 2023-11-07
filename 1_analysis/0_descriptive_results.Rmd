@@ -1,12 +1,11 @@
 ---
-title: "missing_daily_between"
+title: "Descriptive Analyses"
 output: html_document
 date: "2022-08-23"
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
 library(Matrix)
 library(dbplyr)
 library(tidyverse)
@@ -24,36 +23,51 @@ library(scipub)
 library(sjPlot)
 library(brms)
 beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
-
-#library(ggfortify)
 ```
 
-# Load daily data
+# Load data files
 
 ```{r}
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')
 load('../../../../Wrangling/Self_Report/data/self_report_07_19_2023.Rda')
+```
 
 
-total_n_participants = length(unique(selfreport_long$ID))
+# Get # of participants at each visit
+
+```{r}
+total_n_participants = 179
 
 # #s at each time point
 selfreport_long %>%
   group_by(month) %>%
   distinct(ID) %>%
   group_by(month) %>%
-  summarise(count = n(), pct = count/total_n_participants)
+  summarise(count = n(), pct = count/179)
 
 ```
 
+# Join daily data with baseline 
 
 ```{r}
 daily = left_join(daily, self_report_baseline, by = 'ID')
+
+# Remove days after 200 days, participants who haven't finished study
 daily = dplyr::filter(daily, day_num <= 200, TIMEPNT==6) %>%
-    mutate(missing_all_passive = missing_gps +  missing_accel + missing_keyboard == 3, TRUE, FALSE) 
+    mutate(missing_all_passive = missing_gps +  missing_accel + missing_keyboard == 3, TRUE, FALSE) # Daily variable for whether all passive smartphone measures are missing
 
 
+sum(daily$day_num >200)
+
+days_in_study = daily %>%
+  group_by(ID) %>%
+  summarise(max_day_num = max(day_num))
+```
+
+
+# Get # of participant with current SI 
+```{r}
 current_si_check = self_report_baseline %>%
   dplyr::filter(ID %in% daily$ID) %>%
   mutate(current_si = SSI5_i > 0)
@@ -62,22 +76,16 @@ current_si_check = self_report_baseline %>%
 current_si_check %>%
   group_by(current_si) %>%
   count()
-
-daily %>%
-  group_by(TIMEPNT, ID) %>%
-  summarise(n = n()) %>%
-  group_by(TIMEPNT) %>%
-  count()
-  
-
-daily = dplyr::filter(daily, TIMEPNT==6)
+```
 
 
+# Bring in weekly SI survey data
+```{r}
 load('../../cleaned_data/risk.rda')
 
-
+# code weeks when risk surveys are missing
 risk_missing = risk_week_present %>%
-  dplyr::filter(week_num <= 28, days ==7) %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%  # only full weeks 
   group_by(ID) %>%
   mutate(personal_time_z = scale(week_num),
          summerbreak = month %in% c(7, 8),
@@ -87,6 +95,17 @@ risk_missing = risk_week_present %>%
   left_join(., self_report_baseline, by = 'ID') 
 ```
 
+# Service use descriptives
+```{r}
+self_report_baseline %>%
+  dplyr::filter(ID %in% daily$ID) %>%
+  dplyr::select(ID, current_medication, current_therapy, hospitalization_pastyear, visit_er_pastyear) %>%
+  pivot_longer(-ID) %>%
+  group_by(name, value) %>%
+  summarize(n = n(), pct = n/179)
+```
+
+# More descriptive missingness plots
 
 ```{r}
 dplyr::select(daily, daily, n_capture_day, val_sleep_duration_min, n_char_day) %>%
@@ -96,7 +115,7 @@ dplyr::select(daily, `Mood Survey`=daily, `GPS`=n_capture_day, `Accel`=val_sleep
   naniar::gg_miss_upset()
 ```
 
-
+# Generate table of missing data for baseline/self-report measures
 ```{r}
 self_report_missing_df = self_report_baseline %>% 
   dplyr::filter(ID %in% daily$ID) %>%
@@ -108,10 +127,6 @@ selfreport_missing_table = self_report_missing_df %>%
   pivot_longer(-ID) %>%
   group_by(name) %>%
   summarise(n_missing = sum(is.na(value)), pct_missing = round(n_missing/n()*100, 2))
-
-
-selfreport_missing_table
-
 
 time_varying_missing = daily %>% 
   mutate(val_sleep_duration_min = as.numeric(val_sleep_duration_min)) %>%
@@ -126,20 +141,15 @@ risk_missing_summary = risk_missing %>%
   summarise(name = 'risk',
             n_missing = sum(risk_missing), pct_missing= n_missing/n()) 
 
-
-
 missingness_table = 
   rbind(selfreport_missing_table, time_varying_missing, risk_missing_summary)
 
 write.csv(missingness_table,file = '../../tables/missingness_pct.csv')
 ```
 
-
+# Descriptive stats on missing data for different modalities
 
 ```{r}
-load('../../cleaned_data/gps_data_missingness.rda')
-combined_gps = mutate(combined_gps, date = dt_feature)
-
 daily_days_missing = daily %>%
   dplyr::filter(missing_daily==1, day_num < 200) 
 
@@ -159,20 +169,15 @@ load('../../cleaned_data/risk.rda')
 
 risk_weekly %>% dplyr::filter(!is.na(riskOne)) %>% group_by(dayofweek) %>% summarise(n = n(), p = n/nrow(.))
 
-
 risk_week_present = dplyr::select(risk_week_present, date=week, everything())
 
 risk_week_present = mutate(risk_week_present, day = wday(date, label=TRUE))
 
 risk_week_present = left_join(risk_week_present, dplyr::select(daily, date, ID, contains('missing')), by = c('date', 'ID'))
 
-#risk_week_present = mutate(risk_week_present, missing_gps = is.na(n_capture_day))
-
-
 risk_days_missing = risk_week_present %>%
   dplyr::filter(risk_missing==1, week_num <= 28, TIMEPNT == 6) %>%
   dplyr::filter(!is.na(missing_daily))
-
 
 risk_days_missing %>%
   group_by(missing_gps) %>%
@@ -186,11 +191,11 @@ risk_days_missing %>%
   mutate(prop = n/nrow(risk_days_missing))
 ```
 
-# EMA missingness ~ GPS missingness
-```{r}
-risk_gps_missing_model = lme4::glmer(data = dplyr::filter(risk_week_present, week_num < 28), risk_missing ~ missing_gps + (missing_gps|ID), family = binomial(link = 'logit')) 
-daily_gps_missing_model = lme4::glmer(data = dplyr::filter(daily, day_num < 200), missing_daily ~ missing_gps + (missing_gps|ID), family = binomial(link = 'logit')) 
+# EMA missingness ~ passive data missingness
 
+Here, likelihood of missing EMA data is modeled as a function of whether ANY passive mobile sensor data was recorded the same day
+
+```{r}
 risk_week_present = mutate(risk_week_present, missing_all_passive = missing_gps +  missing_accel + missing_keyboard == 3, TRUE, FALSE)
 
 
@@ -198,17 +203,6 @@ risk_missing_passive_model = brms::brm(data = dplyr::filter(risk_week_present, w
                                          family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 2000, seed = 11291993, prior = beta_prior) 
 daily_missing_passive_model = brms::brm(data = dplyr::filter(daily, day_num < 200), missing_daily ~ missing_all_passive + (1|ID), 
                                           family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 2000, seed = 11291993, prior = beta_prior)
-
-
-risk_gps_missing_model %>% emmeans(specs = 'missing_gps', type = 'response') %>%
-  pairs(reverse=TRUE) %>%
-  confint()
-
-
-daily_gps_missing_model %>% emmeans(specs = 'missing_gps', type = 'response') %>%
-  pairs(reverse=TRUE) %>%
-  confint()
-
 
 risk_missing_passive_model %>% emmeans(specs = 'missing_all_passive', type = 'response') %>%
   pairs(reverse=TRUE) %>%
@@ -218,14 +212,9 @@ daily_missing_passive_model %>% emmeans(specs = 'missing_all_passive', type = 'r
   pairs(reverse=TRUE) %>%
   confint()
 
-
-daily %>%
-  group_by(missing_all_passive) %>%
-  summarise(nt = n()/34125)
-
 daily_missing_passive_model %>% emmeans(specs = 'missing_all_passive', type = 'response')
 
-
+# check MLM outputs are consistent with raw data summaries (should differ a little)
 daily %>%
   group_by(missing_all_passive) %>%
   summarise(n = n(), prop_missing_daily = sum(missing_daily)/n())
@@ -237,89 +226,63 @@ risk_week_present %>%
 ```
 
 
+# Discriptive Tables on Study Cohort
+
 ```{r}
-daily %>%
-  dplyr::select(daily, n_capture_day) %>%
-  miss_var_summary()
-
-
 self_report2 = dplyr::filter(self_report_baseline, ID %in% daily$ID) %>%
   mutate(site = ifelse(startsWith(ID, '1'), 'NYC', 'Pittsburgh'))
 
 
-strain_predictors = c('StressCT', 'StressTH', 'EvntCT', 'EvntTH', 'DiffTH', 'DiffCT', 'RecTotCT', 'RecTotTH')
-
-
-clinical_predictors = c('SHAPS_TOT_r_i', 'MFQ_i', 
-                 'SCARED_i', 'SSI19_i', 'INQ_burdenensomeness_i', 'INQ_thwartedbelonging_i', 'SITBI_SB_ever', 'SITBI_sa_ever', 'comorbidity_current',
-                 'SITBI_engaged_nssi_ever', 'SITBI_si_ever', 'MDDcurrent', 'AnxietyCurrent', 'SUDever')
-
-
-sociodemographic_predictors = c('interview_age_years', 'iPhone',
-                 'White', 'Black', 'hispanic', 'sex')
-
-all_predictors = c(clinical_predictors, sociodemographic_predictors)
-```
-
-
-```{r}
 cohort_table = scipub::FullTable1(dplyr::select(self_report2, sex, interview_age_years, site, White, Black, Asian, Multiracial, hispanic, hispanic, SITBI_sa_ever, SITBI_si_ever,  income_categorical, 
                                                 MDDcurrent, AnxietyCurrent, SUDever, SITBI_engaged_nssi_ever))
 
-write.csv(cohort_table,file = '../../tables/cohort_table.csv')
-
-
-cohort_table$table
-
 sjPlot::tab_df(cohort_table$table, title='Table 1.', file = '../../tables/cohort_table1.doc')
 
-
+# more descriptive summaries on cohort characteristics
 summary(selfreport$income_ordinal)
-
 table(selfreport$income_categorical)
-
 summary(selfreport$comorbidity_current)
 
+
+table(selfreport$heterosexual)
+table(selfreport$cisgender)
 ```
 
-# Participant heatmap
+# Supplemental Heatmap Figure Showing Participant Proportions of Misisngness for each Modality
 
 ```{r}
-
-p1 = daily %>%
+daily_pct_missing = daily %>%
   dplyr::select(ID, contains('missing'), -missing_all_passive) %>%
   pivot_longer(contains('missing')) %>%
   group_by(ID, name) %>%
   summarise(pct_missing = sum(value)/n())
 
-
-p2 = risk_missing %>%
+risk_pct_missing = risk_missing %>%
   dplyr::select(ID, risk_missing) %>%
   group_by(ID) %>%
   summarise(pct_missing = sum(risk_missing)/n()) %>%
   mutate(name = 'risk')
 
-p3 = rbind(p1, p2) 
+pct_missing_combined = rbind(daily_pct_missing, risk_pct_missing) 
 
 
-p3 = dplyr::filter(p3, ID %in% self_report_baseline$ID,
+pct_missing_combined = dplyr::filter(pct_missing_combined, ID %in% self_report_baseline$ID,
                        ID %in% daily$ID,
                        ID %in% risk_missing$ID)
 
-p3 = p3 %>%
+pct_missing_combined = pct_missing_combined %>%
   group_by(ID) %>%
   mutate(mean_pct = mean(pct_missing)) %>%
   ungroup()
 
-
-p3 = mutate(p3, 
+pct_missing_combined = mutate(pct_missing_combined, 
             name = dplyr::recode(name, 'risk'='Weekly Suicidal Ideation Survey', 
                                  'missing_keyboard'=' Keyboard Input',
                                  'missing_gps'=' GPS',
                                  'missing_daily'='Daily Mood Survey',
                                  'missing_accel'=' Accelerometer'))
 
-participants_descriptive_missing_all_datatypes_plt = p3 %>%
+participants_descriptive_missing_all_datatypes_plt = pct_missing_combined %>%
   ggplot(data = ., aes(x = forcats::fct_reorder(ID, mean_pct), y = name, fill =pct_missing)) +
   geom_tile() + 
   scale_fill_viridis_c() +

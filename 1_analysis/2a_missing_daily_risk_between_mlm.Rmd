@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Model Between-Participant Baseline Predictors of Missing Data"
 output: html_document
 date: "2022-08-23"
 ---
@@ -19,8 +19,9 @@ library(broom.mixed)
 library(lmerTest)
 library(scales)
 library(brms)
-#library(ggfortify)
 theme_set(theme_bw())
+
+# Functions for running many models in this script
 source('model_wrapper_functions.R')
 options(buildtools.check = function(action) TRUE)
 ```
@@ -31,11 +32,13 @@ load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')
 ```
 
+## For multiple comparisons correction, get # of clinical predictors (15)
 ```{r}
 m = length(clinical_predictors)
 corrected_conf_level = 1- (0.05/m)
 ```
 
+## Set up daily data (up to day 200, participants finishing study)
 ```{r}
 daily = left_join(daily, self_report_baseline, by = 'ID')
 daily = dplyr::filter(daily, day_num <= 200)
@@ -46,7 +49,6 @@ daily = dplyr::filter(daily, TIMEPNT==6)
 # Weekly risk data
 ```{r}
 load('../../cleaned_data/risk.rda')
-
 
 risk_missing = risk_week_present %>%
   dplyr::filter(week_num <= 28, days ==7) %>%
@@ -61,9 +63,11 @@ risk_missing = risk_week_present %>%
 risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
 ```
 
+# Model Formulae
 
-
+## Clinical variable model templates
 ```{r}
+# remove interview date from sociodemographic predictors in models
 sociodemographic_predictors = sociodemographic_predictors[!grepl('interview_date_numeric', sociodemographic_predictors)]
 
 m_formula_template_gps = as.formula(paste('missing_gps ~ scaled_predictor + personal_time_z + weekend + summerbreak +', 
@@ -197,79 +201,18 @@ accel_sociodem_or_brm = baseline_sociodemographic_model_odds_ratio(accel_sociode
                                                               bayes=TRUE)
 
 # Combine
-combined_sociodem_or_brm = rbind(gps_sociodem_or_brm, accel_sociodem_or_brm, keyboard_sociodem_or_brm, daily_sociodem_or_brm, risk_sociodem_or_brm)
+combined_sociodem_or_brm = rbind(gps_sociodem_or_brm, 
+                                 accel_sociodem_or_brm, 
+                                 keyboard_sociodem_or_brm, 
+                                 daily_sociodem_or_brm, 
+                                 risk_sociodem_or_brm)
 
-save(gps_sociodem_model_brm, accel_sociodem_model_brm, keyboard_sociodem_model_brm, daily_sociodem_model_brm, risk_sociodem_model_brm, combined_sociodem_or_brm, file = 'model_outputs/sociodemographic_predictors_missingness_brm.rda')
-
-
-summary(daily_sociodem_model_brm)
-```
-
-
-# Models of all clinical + sociodemographic predictors together
-
-
-```{r}
-combined_predictors_model = as.formula(paste('missing ~ personal_time_z + weekend + summerbreak +', 
-                                          paste(sociodemographic_predictors, collapse = '+'), ' +', paste(clinical_predictors[clinical_predictors!='SITBI_SB_ever'], collapse = '+'), ' + (1 |ID)'))
-
-combined_predictors_model_weekly = as.formula(paste('missing ~ personal_time_z + summerbreak +', 
-                                          paste(sociodemographic_predictors, collapse = '+'), ' +', paste(clinical_predictors[clinical_predictors!='SITBI_SB_ever'], collapse = '+'), ' + (1 |ID)'))
-
-daily_missing_long = daily %>%
-    pivot_longer(cols = c('missing_daily', 'missing_gps', 'missing_accel', 'missing_keyboard'), names_to = 'missing_outcome', values_to = 'missing') %>%
-    group_by(missing_outcome) 
-
-combined_predictors_model_frame = daily_missing_long %>%
-      nest() %>%
-      mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model, 
-                                                 family = bernoulli(link = 'logit'),
-                                                 cores = 4, chains = 4, iter = 10, seed = 11291993,
-                                                 prior = beta_prior)))
-
-
-combined_predictors_risk_model_frame = risk_missing %>%
-  pivot_longer(cols = c('risk_missing'), names_to = 'missing_outcome', values_to = 'missing') %>%
-  group_by(missing_outcome) %>%
-  nest() %>%
-  mutate(model = purrr::map(data, ~brms::brm(data = ., formula = combined_predictors_model_weekly, 
-                                                 family = bernoulli(link = 'logit'),
-                                                 cores = 4, chains = 4, iter = 10, seed = 11291993,
-                                                 prior = beta_prior)))
-
-
-combined_predictors_or_frame_risk = pull_separate_model_odds_ratios(model_df = combined_predictors_risk_model_frame, 
-                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
-
-combined_predictors_or_frame = pull_separate_model_odds_ratios(model_df = combined_predictors_model_frame, 
-                                                               conf_level_corrected = corrected_conf_level, bayes = TRUE)
-
-combined_predictors_or_frame = rbind(combined_predictors_or_frame, combined_predictors_or_frame_risk)
-
-combined_predictors_or_frame_sociodem = dplyr::rename(combined_predictors_or_frame, 'type'='missing_outcome', 'correction'='or_type') %>%
-  dplyr::filter(term %in% sociodemographic_predictors) %>%
-  mutate(type = dplyr::recode(type, 
-                              'missing_accel'='Accelerometer',
-                              'missing_gps'='GPS',
-                              'missing_keyboard'='Keyboard Input',
-                              'missing_daily'='Daily Mood Survey',
-                              'risk_missing'='Weekly SI Survey'))
-
-combined_predictors_or_frame = dplyr::rename(combined_predictors_or_frame, 'name'='term', 'type'='missing_outcome') %>%
-  mutate(term = 'scaled_predictor') %>%
-  dplyr::filter(name %in% clinical_predictors) %>%
-  mutate(type = dplyr::recode(type, 
-                              'missing_accel'='Accelerometer',
-                              'missing_gps'='GPS',
-                              'missing_keyboard'='Keyboard Input',
-                              'missing_daily'='Daily Mood Survey',
-                              'risk_missing'='Weekly SI Survey'))
-
-
-
-clinical_or_mlm_bayes_combined = baseline_predictors_missingness_or_plot(or_df = combined_predictors_or_frame, m = m, bayes = TRUE)
-sociodem_plot_bayes_combined = make_sociodem_or_plot(sociodem_or_df = combined_predictors_or_frame_sociodem, m = m, bayes = TRUE)
-
-sfig_odds_ratio_bayes_baseline_combined = cowplot::plot_grid(clinical_or_mlm_bayes_combined, sociodem_plot_bayes_combined, ncol = 1, align = 'v', axis = 'lr',
-                   labels = c('A', 'B'), rel_heights = c(1.5, 1))
+# Save outputs for compiling stats/plotting
+save(gps_sociodem_model_brm, 
+     accel_sociodem_model_brm, 
+     keyboard_sociodem_model_brm, 
+     daily_sociodem_model_brm, 
+     risk_sociodem_model_brm, 
+     combined_sociodem_or_brm, 
+     file = 'model_outputs/sociodemographic_predictors_missingness_brm.rda')
 ```

@@ -1,8 +1,16 @@
 ---
-title: "missing_daily_between"
+title: "Do proximal passive sensor features predict missingness of daily mood data the same / next day? -- Supplemental Analysis Explicitly Incorporating Missing Passive Sensor Data"
 output: html_document
 date: "2022-08-23"
 ---
+
+# In these analyses, all passive features are categorical varibles with 3 levels:
+
+-low (below participant-specific median)
+-high (at or above participant-specific median)
+-missing
+
+This way, missing sensor data is explicitly incorporated into analyses of daily mood missingness
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

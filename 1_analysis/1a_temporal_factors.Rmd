@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Temporal Factor Associations With Missingness"
 output: html_document
 date: "2022-08-23"
 ---
@@ -18,11 +18,12 @@ library(naniar)
 library(broom.mixed)
 library(lmerTest)
 library(scales)
-#library(ggrepel)
 library(brms)
 theme_set(theme_bw())
 source('model_wrapper_functions.R')
 ```
+
+# Define Color Palettes
 
 ```{r}
 # Palette from http://mkweb.bcgsc.ca/colorblind/palettes/8.color.blindness.palette.txt
@@ -40,7 +41,6 @@ daily = dplyr::filter(daily, TIMEPNT==6, day_num < 200)
 
 # 1. Models for OR
 
-
 ## Time models for daily & passive 
 ```{r}
 comparisons = 3
@@ -57,7 +57,7 @@ daily_long = daily %>%
   pivot_longer(contains('missing')) 
 ```
 
-
+## Run models
 ```{r}
 time_models_daily_basis = daily_long %>% group_by(name) %>%
   nest() %>%
@@ -167,33 +167,6 @@ or_plot = time_or_daily_basis %>%
        x = NULL, color = NULL) +
   scale_color_manual(values = pal2) +
   theme(legend.position = 'none')
-
-
-or_plot_sobp = time_or_daily_basis %>%
-  dplyr::filter(! term %in% c('(Intercept)', 'sd__(Intercept)')) %>%
-  mutate(term = dplyr::recode(term,
-                              'weekend'='Weekend > Week Days',
-                              'summerbreak1'='Summer Break > School Year',
-                              'month_num_center'='+1 Month Since Baseline'),
-         name = dplyr::recode(name,
-                              'missing_accel'='Accelerometer',
-                              'missing_gps'='GPS',
-                              'missing_keyboard'='Keyboard Input',
-                              'missing_daily'='Daily Mood Survey')) %>%
-  ggplot(data = ., aes(x = term, y = estimate, color=name)) +
-  geom_point(position = position_dodge(0.2), size = 3) + 
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2), lwd = 1) +
-  geom_hline(yintercept = 1, lty = 2) +
-  coord_flip() +
-  scale_y_log10() +
-  labs(y = 'Association with missingness\nAdjusted Odds Ratio',
-       x = NULL, color = NULL) +
-  scale_color_manual(values = pal) +
-   theme(text = element_text(face = 'bold', size = 20),
-         legend.position = 'bottom') +
-  guides(color=guide_legend(nrow=2,byrow=TRUE)) +
-  theme(axis.text.y = element_text(angle = 30, vjust = 0.5, hjust=1))
-
 ```
 
 ```{r}
@@ -222,6 +195,7 @@ write.csv(time_or_table, row.names = FALSE, file = '../../tables/supplement/desi
 
 # 2. Plot raw proportions of missing data over time
 
+First calculate sliding window proportions of data over time (over week windows)
 ```{r}
 # for calculating weekly rolling averages of missingness
 rolling_proportion_missing = function(df,day_num_select, days_back, variable){
@@ -270,6 +244,10 @@ daily_day_num_proportions = rolling_df %>%
   dplyr::filter(!(day_num <=7  & name == 'Accelerometer'),
                 day_num < 180)
 
+```
+
+Plot rolling window proportions of missing data 
+```{r}
 risk_week_num_proportions = risk_week_present %>%
   dplyr::select(ID, week_num, risk_missing) %>%
   group_by(week_num) %>% 
@@ -305,21 +283,6 @@ timeplt = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
     aes(label = format(round(p,2), nsmall=2), color = name), data = time_ends,
     fontface ="plain",  size = 3, direction = 'both', show.legend =FALSE) +
   scale_color_manual(values = pal2)
-
-timeplt_sobp = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
-  geom_hline(yintercept = 0.5, lty = 2) +
-  geom_line(aes(color = name)) +
-  labs(y = 'P(Missing)', x = "Weeks since baseline (person-weeks)\n", color= NULL) +
-  scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25)) +
-  theme(legend.position = 'right',
-        text = element_text(face = 'bold', size = 13)) +
-  geom_label_repel(
-    aes(label = round(p,2), color = name), data = time_starts,
-    fontface ="plain",  size = 3, direction = 'both', point.padding = 1, show.legend =FALSE) +
-  geom_label_repel(
-    aes(label = round(p,2), color = name), data = time_ends,
-    fontface ="plain",  size = 3, direction = 'both', show.legend =FALSE) +
-  scale_color_manual(values = pal2)
 ```
 
 
@@ -327,7 +290,7 @@ timeplt_sobp = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
 ```{r}
 daily = mutate(daily, weds = dayofweek=='Wednesday')
 
-# exclude weekends here to comapre wednesday to other weekdays
+# exclude weekends here to compare wednesday to other weekdays
 m_weds_daily = brms::brm(data = dplyr::filter(daily, weekend == '0'), missing_daily ~  summerbreak + weds + personal_time_z + (weds |ID), 
                          family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
 ```
@@ -353,7 +316,7 @@ summary(m_week_month_keyboard_t)
 save(m_weds_daily, m_week_month, m_week_month_keyboard, m_week_month_accel, file = 'model_outputs/day_of_week_month_models.rda')
 ```
 
-
+# Plots as a function of day of week / month of year
 
 ```{r}
 month_daily = emmeans::emmeans(m_week_month, specs = 'month', type = 'response',
@@ -421,19 +384,7 @@ weekplt = week_daily %>%
 top_row =  cowplot::plot_grid(timeplt, or_plot, labels = c('A', 'B'), rel_widths = c(1.6, 1))
 bottom_row = cowplot::plot_grid(weekplt, monthplt, labels = c('C', 'D'))
 
-
 design_grid = cowplot::plot_grid(top_row, bottom_row, nrow = 2)
-
 cowplot::save_plot(design_grid, filename = '../../figures/fig3.1_design_features_daily_missingness.png', base_width = 10, base_height = 7)
-
-
-top_row_sobp =  cowplot::plot_grid(timeplt_sobp, or_plot_sobp, labels = c('A', 'B'), rel_widths = c(1.5, 1))
-
-
-cowplot::save_plot(top_row_sobp, filename = '../../figures/sobp/design_features.png', base_width = 12, base_height = 4)
-
-ggsave(or_plot_sobp, filename = '../../figures/sobp/design_features.png', height = 6, width = 9)
 ```
-
-
 

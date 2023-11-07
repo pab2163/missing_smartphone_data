@@ -1,8 +1,10 @@
 ---
-title: "missing_daily_between"
+title: "Plot Main Figures for 2a (Aim 1), between person baseline predictors of missing data"
 output: html_document
 date: "2022-08-23"
 ---
+
+# Loads model outputs from `2a_missing_daily_risk_between_mlm.Rmd`
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

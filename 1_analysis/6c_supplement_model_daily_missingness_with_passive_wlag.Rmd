@@ -1,8 +1,10 @@
 ---
-title: "missing_daily_between"
+title: "Model Daily Mood Missingness with Passive Features - Supplemental Analyses with included 1-day/1-week lagged missing data indicator"
 output: html_document
 date: "2022-08-23"
 ---
+
+# Models should account for temporal autocorelation of missingness
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -28,9 +30,10 @@ beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 theme_set(theme_bw())
 ```
 
-# Load daily data
+# Load data
 
 ```{r}
+load('../../../cleaned_data/covid.Rda')
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')
 sleep = read_csv('../../cleaned_data/daily_sleep_jackie_cleaning.csv') %>%
@@ -79,14 +82,13 @@ daily = daily %>%
                  sleep_on_lag1 = lag(sleep_on, n = 1),
                  sleep_off_lag1 = lag(sleep_off, n = 1),
                  sleep_duration_lag1 = lag(sleep_duration, n = 1),
-                 n_char_day_scale_lag1 = lag(n_char_day_scale, n = 1)
-         )
-
-hist(daily$prop_word_pos_day_scale)
-hist(daily$prop_word_neg_day_scale)
+                 n_char_day_scale_lag1 = lag(n_char_day_scale, n = 1),
+         missing_daily_lag1 = lag(missing_daily, n=1))
+```
 
 
-passive_predict_daily_missing_formula = as.formula('missing_daily ~ value + weekend + summerbreak + personal_time_z + (value|ID)')
+```{r}
+passive_predict_daily_missing_formula = as.formula('missing_daily ~ value + missing_daily_lag1 + weekend + summerbreak + personal_time_z + (value|ID)')
 
 
 daily_long = daily %>%
@@ -116,35 +118,36 @@ conf_level = 1-(.05/num_predictors)
 
 ## Fit models (continuous)
 ```{r}
-passive_predict_daily_missing_models = daily_long %>%
+passive_predict_daily_missing_models_wlag = daily_long %>%
   group_by(name) %>%
   nest() %>%
   mutate(model = purrr::map(data, ~brms::brm(data = ., formula = passive_predict_daily_missing_formula,
                                         family = bernoulli(link = 'logit'),
                                         chains = 4, cores = 4, iter = 2000, seed = 11291993, prior = beta_prior)))
 
-save(passive_predict_daily_missing_models, file = 'model_outputs/passive_predict_daily_missingness_brm.rda')
+save(passive_predict_daily_missing_models_wlag, file = 'model_outputs/passive_predict_daily_missingness_brm_wlag.rda')
 ```
+
 ## Extract Odds Ratios from Models
 
 ```{r}
-passive_predict_daily_missing_or_uncorrected = passive_predict_daily_missing_models %>%
+passive_predict_daily_missing_or_uncorrected = passive_predict_daily_missing_models_wlag %>%
   mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
                                                   at = list('value'=c(0,1))) %>%
                            pairs(reverse = TRUE) %>%
                            confint(level = 0.95) %>%
                            data.frame())) %>%
   unnest(or) %>%
-  dplyr::select(-data, -model) 
+  dplyr::select(-data, -model)
 
-passive_predict_daily_missing_or_corrected= passive_predict_daily_missing_models %>%
+passive_predict_daily_missing_or_corrected= passive_predict_daily_missing_models_wlag %>%
   mutate(or = purrr::map(model, ~emmeans::emmeans(., specs = 'value', type = 'response',
                                                   at = list('value'=c(0,1))) %>%
                            pairs(reverse = TRUE) %>%
                            confint(level = conf_level) %>%
                            data.frame())) %>%
   unnest(or) %>%
-  dplyr::select(-data, -model) 
+  dplyr::select(-data, -model)
 
 passive_predict_daily_missing_or_corrected  = passive_predict_daily_missing_or_corrected %>%
   mutate(lag = ifelse(grepl('lag1', name), '1 Day Prior', 'Same Day'),
@@ -190,7 +193,7 @@ passive_predict_daily_missing_or_uncorrected  = passive_predict_daily_missing_or
                               'gps_capture_scale'='# of GPS measurements\n+1SD'))
 
 
-sig_frame = left_join(passive_predict_daily_missing_or_uncorrected, 
+sig_frame = left_join(passive_predict_daily_missing_or_uncorrected,
           dplyr::select(passive_predict_daily_missing_or_corrected, lower_corrected = lower.HPD, upper_corrected = upper.HPD, name, contrast, lag),
           by = c('name', 'contrast', 'lag')) %>%
   mutate(sig_star = case_when(
@@ -198,18 +201,18 @@ sig_frame = left_join(passive_predict_daily_missing_or_uncorrected,
     (lower_corrected-1)*(upper_corrected-1) <= 0 & (lower.HPD-1)*(upper.HPD-1) > 0 ~ '+',
     (lower.HPD-1)*(upper.HPD-1) <= 0 ~ ''))
 
-passive_predict_daily_missing_or_plot = passive_predict_daily_missing_or_uncorrected %>%
+passive_predict_daily_missing_or_plot_wlag = passive_predict_daily_missing_or_uncorrected %>%
   ggplot(data = ., aes(x = name_recode, y = odds.ratio, color = lag)) +
   geom_point(position = position_dodge(width=0.5), size = 2) +
-  geom_errorbar(data = passive_predict_daily_missing_or_corrected, 
+  geom_errorbar(data = passive_predict_daily_missing_or_corrected,
                 aes(ymin = lower.HPD, ymax = upper.HPD),width = 0,
                 position = position_dodge(width=0.5)) +
   geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD), width = 0, lwd = 1,
                 position = position_dodge(width=0.5)) +
-  geom_hline(yintercept = 1, lty = 2) + 
+  geom_hline(yintercept = 1, lty = 2) +
   geom_text(data = sig_frame, aes(x = name_recode, y = upper_corrected*1.05, label = sig_star, color = lag),
             position = position_dodge(width=0.5), show.legend = FALSE) +
-  facet_grid(rows = vars(grouping), drop=TRUE, scales = 'free', switch = 'both') + 
+  facet_grid(rows = vars(grouping), drop=TRUE, scales = 'free', switch = 'both') +
   scale_y_log10(breaks = c(0.5, 0.75, 1, 1.5, 2), limits = c(0.5, 1.5)) +
   coord_flip() +
   labs(color = 'Time window of passive sensor\nrelative to daily mood survey', x = NULL, y = 'Association with missing daily mood\nAdjusted Odds Ratio') +
@@ -218,117 +221,8 @@ passive_predict_daily_missing_or_plot = passive_predict_daily_missing_or_uncorre
   guides(color=guide_legend(nrow=2,byrow=TRUE)) +
   scale_color_manual(values = c('cadetblue2', 'Dark Blue'))
 
-ggsave(passive_predict_daily_missing_or_plot, file = '../../figures/fig5.1_missing_daily_proximal_passive_or.png', height=5, width = 8)
-```
-
-```{r}
-conditional_effects_wake = passive_predict_daily_missing_models$model[passive_predict_daily_missing_models$name=='sleep_off'][[1]] %>%
-  conditional_effects(., plot = FALSE)
-
-conditional_effects_hours_traveling = passive_predict_daily_missing_models$model[passive_predict_daily_missing_models$name=='travel_day_hours_scale'][[1]] %>%
-  conditional_effects(., plot = FALSE)
-
-conditional_effects_characters_typed = passive_predict_daily_missing_models$model[passive_predict_daily_missing_models$name=='n_char_day_scale'][[1]] %>%
-  conditional_effects(., plot = FALSE)
+ggsave(passive_predict_daily_missing_or_plot_wlag, file = '../../figures/supplement/missing_daily_proximal_passive_wlag.png', height=8, width = 5)
 ```
 
 
-Models using binned predictors (not assuming linearity)
-
-```{r}
-n_chars_factor_model = daily %>%
-  ungroup() %>%
-  dplyr::filter(!is.na(n_char_day_scale)) %>%
-  mutate(n_char_day_scale_bin = cut_interval(n_char_day_scale, length = 1),
-         n_char_day_scale_bin= as.character(parse_number(gsub(",.*$", "", n_char_day_scale_bin)))) %>%
-  brms::brm(data = ., missing_daily ~ n_char_day_scale_bin + weekend + summerbreak + personal_time_z + (1|ID),
-              family = bernoulli(link = 'logit'), cores = 4, chains = 4, seed = 11291993, prior = beta_prior)
-
-sleep_off_factor_model = daily %>%
-  ungroup() %>%
-  dplyr::filter(!is.na(sleep_off)) %>%
-  mutate(sleep_off_hour = cut_interval(sleep_off, length = 1), 
-         sleep_off_hour= as.character(parse_number(gsub(",.*$", "", sleep_off_hour)))) %>%
-  brms::brm(data = ., missing_daily ~ sleep_off_hour + weekend + summerbreak + personal_time_z + (1|ID),
-              family = bernoulli(link = 'logit'), cores = 4, chains = 4, seed = 11291993, prior = beta_prior)
-
-
-daily_hours_traveling_factor_model = daily %>%
-  ungroup() %>%
-  dplyr::filter(!is.na(travel_day_hours_scale)) %>%
-  mutate(travel_day_hours_scale_bin = cut_interval(travel_day_hours_scale, length = 1),
-         travel_day_hours_scale_bin= as.character(parse_number(gsub(",.*$", "", travel_day_hours_scale_bin)))) %>%
-  brms::brm(data = ., missing_daily ~ travel_day_hours_scale_bin + weekend + summerbreak + personal_time_z + (1|ID),
-              family = bernoulli(link = 'logit'), cores = 4, chains = 4, seed = 11291993, prior = beta_prior)
-
-
-n_chars_factor_model_emmean = conditional_effects(n_chars_factor_model)[[1]] %>%
-  mutate(value = n_char_day_scale_bin,
-         value = as.numeric(as.character(value)))
-
-sleep_off_factor_model_emmean = conditional_effects(sleep_off_factor_model)[[1]] %>%
-  mutate(value = sleep_off_hour,
-         value = as.numeric(as.character(value)))
-
-daily_hours_traveling_factor_model_emmean = conditional_effects(daily_hours_traveling_factor_model)[[1]] %>%
-  mutate(value = travel_day_hours_scale_bin,
-         value = as.numeric(as.character(value)))
-
-save(daily_hours_traveling_factor_model, sleep_off_factor_model, n_chars_factor_model,
-     file = 'model_outputs/passive_predict_daily_missingness_brm_discrete_models_for_plots.rda')
-```
-
-
-```{r}
-sleep_off_plot = ggplot(conditional_effects_wake$value, aes(x = value, y = estimate__)) +
-  geom_vline(xintercept = 8, lty = 2, color = 'red') +
-  annotate(geom = 'text', 
-            label = 'Prompt Delivered\n8am Daily',
-            color = 'red',
-            x = 6, y = .6) +  
-  geom_line(lwd = 2) +
-  geom_ribbon(aes(ymin=lower__, ymax=upper__), alpha = 0.2, fill = 'Dark Blue') +
-  geom_point(data = sleep_off_factor_model_emmean, alpha = 0.8, color = 'navy') + 
-  geom_errorbar(data = sleep_off_factor_model_emmean, width = 0.1,
-                aes(ymin = lower__, ymax = upper__),
-                alpha = 0.8, color = 'navy') +
-  xlim(3.9, 12.1) +
-  ylim(0.2, 0.7) + 
-  labs(x = 'Wake Time on the Same Day\nHour of Day (AM)', y = 'P(Missing Daily Mood)')
-
-
-hours_traveled_plot = ggplot(conditional_effects_hours_traveling$value, aes(x = value, y = estimate__)) +
-  geom_line(lwd = 2) +
-  geom_ribbon(aes(ymin=lower__, ymax=upper__), alpha = 0.2, fill = 'Dark Blue') +
-  geom_point(data = daily_hours_traveling_factor_model_emmean, alpha = 0.8, color = 'navy') + 
-  geom_errorbar(data = daily_hours_traveling_factor_model_emmean, width = 0.1,
-                aes(ymin = lower__, ymax = upper__),
-                alpha = 0.8, color = 'navy') +
-  xlim(-2.1, 2.1) +
-  ylim(0.2, 0.7) + 
-  labs(x = 'Hours Traveling the Same Day\nRelative to Within-Person Median', y = 'P(Missing Daily Mood)') 
-
-
-chars_typed_plot = ggplot(conditional_effects_characters_typed$value, aes(x = value, y = estimate__)) +
-  geom_line(lwd = 2) +
-  geom_ribbon(aes(ymin=lower__, ymax=upper__), alpha = 0.2, fill = 'Dark Blue') +
-  geom_point(data = n_chars_factor_model_emmean, alpha = 0.8, color = 'navy') + 
-  geom_errorbar(data = n_chars_factor_model_emmean, width = 0.1,
-                aes(ymin = lower__, ymax = upper__),
-                alpha = 0.8, color = 'navy') + 
-  xlim(-2.1, 2.1) + 
-  ylim(0.2, 0.7) + 
-  labs(x = '# of Characters Typed the Same Day\nRelative to Within-Person Median', y = 'P(Missing Daily Mood)')
-
-
-sleep_travel_plot = cowplot::plot_grid(hours_traveled_plot, chars_typed_plot, sleep_off_plot, nrow = 3,
-                                       labels = c('B', 'C', 'D'))
-
-passive_panel = cowplot::plot_grid(passive_predict_daily_missing_or_plot, sleep_travel_plot, 
-                   rel_widths = c(1, 1),
-                   labels = c('A', ''))
-
-cowplot::save_plot(passive_panel, filename = '../../figures/fig5.2_missing_daily_proximal_passive.png',
-                   base_height = 8, base_width = 9)
-```
 

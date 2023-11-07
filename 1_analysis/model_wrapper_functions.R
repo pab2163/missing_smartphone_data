@@ -274,7 +274,7 @@ make_sociodem_or_plot = function(sociodem_or_df, m, bayes=FALSE){
                                 'MFQ_i'='Depression Symptoms (MFQ)',
                                 'SITBI_sa_ever'='Lifetime Suicide Attempt (SITBI)', 'SHAPS_TOT_r_i'='Anhedonia (SHAPS)','comorbidity_current'='# Current Diagnoses',
                                 'SITBI_si_ever'='Lifetime Suicidal Ideaction (SITBI)', 'hospitalization_pastyear' = 'Past Year Hospitalization',
-                                'visit_er_pastyear'='Past Year ER Visit', 'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
+                                'visit_er_pastyear'='Past Year ED Visit', 'SITBI_SB_ever'='Lifetime Suicidal Behavior (SITBI)',
                                 'SCARED_i'='Anxiety Symptoms (SCARED)', 'SSI19_i'='Suicidal Ideation Severity (SSI)',
                                 'INQ_burdenensomeness_i'='Perceived Burdensomeness (INQ)', 'INQ_thwartedbelonging_i'='Thwarted Belonging (INQ)',
                                 'hispanic'='Hispanic','income_ordinal'='Parental Income',

@@ -1,8 +1,12 @@
 ---
-title: "missing_daily_between"
+title: "Temporal Factors - Sensitivity Check With Included 1-day Lagged Outcome"
 output: html_document
 date: "2022-08-23"
 ---
+
+# 1-day lagged outcome
+
+This should help account for potentially autocorrelated missingness
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -23,6 +27,9 @@ library(brms)
 theme_set(theme_bw())
 source('model_wrapper_functions.R')
 ```
+
+# Define Color Palettes
+
 
 ```{r}
 # Palette from http://mkweb.bcgsc.ca/colorblind/palettes/8.color.blindness.palette.txt
@@ -46,7 +53,6 @@ daily = dplyr::filter(daily, TIMEPNT==6, day_num < 200)
 comparisons = 3
 conf_level_corrected = 1-(0.05/comparisons)
 ```
-
 
 ```{r}
 beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))

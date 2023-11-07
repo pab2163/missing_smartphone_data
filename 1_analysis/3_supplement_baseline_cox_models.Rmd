@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Cox Models: which participants are more likely to 'drop out' of smartphone data collection"
 output: html_document
 date: "2022-08-23"
 ---
@@ -19,12 +19,13 @@ library(broom.mixed)
 library(scales)
 library(survminer)
 library(brms)
-#library(ggfortify)
 theme_set(theme_bw())
 source('model_wrapper_functions.R')
 options(buildtools.check = function(action) TRUE)
 ```
 
+
+# Pull in data
 
 ```{r}
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
@@ -62,8 +63,9 @@ risk_missing = dplyr::filter(risk_missing, TIMEPNT==6)
 ```
 
 
-## Add "dropout" variables to daily
+## Add "dropout" variables to daily, and calculate time to first dropout 
 
+EARS dropout treated as not having a period of 30+ days with no EARS data
 ```{r}
 daily = mutate(daily, missing_everything = ifelse(missing_daily + missing_gps + missing_accel + missing_keyboard == 4, NA_real_, 0)) 
 
@@ -97,7 +99,7 @@ first_dropout = daily_dropout %>%
   slice_min(n = 1, order_by = day_num)
 ```
 
-# Survival
+# Wrangle data with "survival" treated as not having a period of 30+ days with no EARS data
 
 ```{r}
 no_gaps = daily %>%
@@ -107,7 +109,6 @@ no_gaps = daily %>%
   dplyr::filter(! ID %in% first_dropout$ID) %>%
   mutate(status = 0)
 
-
 times_in_study = rbind(dplyr::select(first_dropout, ID, day_num) %>% mutate(status = 1), 
       no_gaps)
 
@@ -115,33 +116,17 @@ times_in_study = rbind(dplyr::select(first_dropout, ID, day_num) %>% mutate(stat
 times_in_study = left_join(times_in_study, self_report_baseline, by = 'ID') %>%
     mutate(site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
          siteCUMC = site == 'CUIMC')
-
-# prelim_survival = survival::survfit(survival::Surv(day_num, status) ~group, data = times_in_study)
-# summary(prelim_survival)
-# 
-# prelim_survival_data = with(prelim_survival, data.frame(time, n.risk, n.event, std.err, surv, lower, upper))
-# 
-# autoplot(prelim_survival) +
-#   xlim(0,200) +
-#   labs(x = 'Days since baseline', y = '% of participants still in study\ndropout = 30+ day gap')
-# 
-# cox1 = survival::coxph(survival::Surv(day_num, status) ~group,data = times_in_study)
-# summary(cox1)
-# 
-cox2 = survival::coxph(survival::Surv(day_num, status) ~SITBI_si_ever ,data = times_in_study)
-
-summary(cox2)
-
-
 ```
 
 
 
 ```{r}
+# Prepared data in long form for cox models
 cox_long = times_in_study %>%
   pivot_longer(cols = c(clinical_predictors), values_to = 'scaled_predictor') %>%
   group_by(name)
 
+# A separate model for sociodemographic variables
 cox_demographic = survival::coxph(survival::Surv(day_num, status) ~ interview_age_years +
                                                      iPhone + Asian + White + Black + hispanic + sexM + siteCUMC, data = times_in_study)
 
@@ -155,11 +140,12 @@ cox_models = cox_long %>%
                                                      iPhone + Asian + White + Black + hispanic + sexM + siteCUMC, data =.)),
          coef = purrr::map(model, ~broom.mixed::tidy(., conf.int=TRUE, exponentiate=TRUE)))
 
+# unnest models
 cox_coefs = cox_models %>%
   unnest(coef) %>%
   dplyr::select(-model, -data)
 
-
+# clean up model outputs for plot
 cox_coefs = cox_coefs %>%
     dplyr::filter(term == 'scaled_predictor') %>%
     rbind(.,cox_demographic_tidy) %>%
@@ -193,6 +179,7 @@ cox_coefs = cox_coefs %>%
       continuous = ifelse(variable_category == 'Psychopathology', '*', ''),
       name = ifelse(variable_category %in% c('Service', 'SITBI', 'Psychopathology'), paste0(name, continuous), name))
 
+# Plot hazard ratios from cox models
 cox_coef_plot = cox_coefs %>%
   ggplot(data = ., aes(x= name, y = estimate)) +
   geom_point(position = position_dodge(0.4)) +
@@ -206,27 +193,8 @@ cox_coef_plot = cox_coefs %>%
   facet_grid(rows = vars(variable_category), drop = TRUE, scales = 'free') +
   theme(strip.text.y = element_blank()) 
 
-
+# save plot
 ggsave(cox_coef_plot, filename = '../../figures/supplement/cox_model_hazard_ratios.png', width = 8, height = 8)
 ```
 
 
-## Survival plot for site
-```{r}
-
-cox_site = survival::coxph(survival::Surv(day_num, status) ~siteCUMC, data = times_in_study)
-
-site_fit = survival::survfit(cox_site, data = times_in_study, newdata = data.frame(siteCUMC=c(TRUE, FALSE)))
-
-
-survival_plot_site = ggsurvplot(site_fit, conf.int = TRUE, legend.title = 'Site',
-           legend.labs = c('NYC', 'Pittsburgh'),
-           ggtheme = theme_minimal())
-
-
-# png('../../figures/supplement/survival_plot_site.png', width = 600, height = 480, units = "px", pointsize = 20)
-# print(survival_plot_site)
-# dev.off()
-
-ggsave(survival_plot_site$plot, filename= '../../figures/supplement/survival_plot_site.png')
-```

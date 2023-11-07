@@ -267,12 +267,15 @@ descriptive_timeline_plot_mood = descriptive_timeline_plot_data %>%
   ggplot(aes(x = day_num, y = fct_reorder(.f = ID, .x = pct_missing_daily))) +
   geom_tile(aes(fill = missing_daily)) +
   geom_point(data = dplyr::filter(descriptive_timeline_plot_data, missing_all_passive==TRUE), 
-             color = 'black', shape = 4, size = 0.5, aes(color = missing_all_passive, shape ='hi'), alpha = 0.5) + 
+             color = 'black', shape = 4, size = 0.2, aes(color = missing_all_passive, shape ='hi'), alpha = 0.6) + 
   labs(x = 'Number of days from baseline\nx indicates days with no passive sensor measurements', 
        y = 'Participants', 
        fill = 'Missingness of Daily Mood Survey',
        color = 'Missingness of Daily Mood Survey', title = 'A: Overall Missingness Patterns', subtitle ='Daily mood surveys') +
-  theme(axis.text.y = element_blank(), legend.position = 'bottom') +
+  theme(axis.text.y = element_blank(), legend.position = 'bottom',
+        axis.ticks.y= element_blank(),
+        axis.title = element_text(size = 13),
+        text = element_text(face = 'bold')) +
   scale_x_continuous(expand = c(0, 0), limits = c(0,180))
 
 
@@ -283,7 +286,7 @@ daily_totaln = nrow(daily)
 
 passive_daily_pattern_data = daily %>%
   ungroup() %>%
-  mutate(totaln = daily_totaln) %>%
+  mutate(totaln = daily_totaln) %>% 
   group_by(missing_daily, missing_all_passive) %>%
   summarise(n = n()) %>%
   mutate(pct = n/daily_totaln) %>%
@@ -301,10 +304,14 @@ passive_daily_summary_plot = passive_daily_pattern_data %>%
   geom_label(aes(label = round(pct, 3))) + 
   coord_flip() +
   labs(x = '', y = 'total # of observations', title = 'B: Co-occurrance of missingness', subtitle = 'Daily mood surveys & passive sensor data') +
-  theme(axis.text.y=element_text(angle=45, hjust=1)) +
-  ylim(0, max(passive_daily_pattern_data$n) + 370)
+  theme(axis.text.y=element_text(angle=30, hjust=1, size = 13),
+        text = element_text(face='bold'),
+        axis.title = element_text(size = 13),
+        plot.title = element_text(hjust = 1.5),
+        plot.subtitle = element_text(hjust = 1.2)) +
+  ylim(-100, max(passive_daily_pattern_data$n) + 800)
 
-descriptive_fig=cowplot::plot_grid(descriptive_timeline_plot_mood, passive_daily_summary_plot, rel_widths = c(1.8, 1), align = 'h', axis = 'bt')
-cowplot::save_plot(descriptive_fig, base_height = 6, base_width = 13, filename = '../../figures/fig1.1_descriptive_missingness.png')
+descriptive_fig=cowplot::plot_grid(descriptive_timeline_plot_mood, passive_daily_summary_plot, rel_widths = c(1.5, 1), align = 'h', axis = 'bt')
+cowplot::save_plot(descriptive_fig, base_height = 5, base_width = 11, filename = '../../figures/fig1.1_descriptive_missingness.png')
 
 ```

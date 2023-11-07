@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Make supplemental tables for baseline clinical sociodemographic/clinical predictors of missing data"
 output: html_document
 date: "2022-08-23"
 ---
@@ -20,7 +20,6 @@ library(lmerTest)
 library(scales)
 library(brms)
 library(cowplot)
-#library(ggfortify)
 theme_set(theme_bw())
 source('model_wrapper_functions.R')
 ```

@@ -1,8 +1,11 @@
 ---
-title: "Supplemental Analyses"
+title: "Model Between-Participant Baseline Predictors of Missing Data: Supplemental Analysis Accounting for Days with No Passive Data"
 output: html_document
 date: "2022-08-23"
 ---
+
+
+# Add a covariate of a binary indicator for days with no passive data collected, so that we can look at predictors of missing survey data above and beyond EARS being deactivated
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

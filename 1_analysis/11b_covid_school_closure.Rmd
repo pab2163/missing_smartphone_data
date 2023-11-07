@@ -1,0 +1,159 @@
+---
+title: "missing_daily_between"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+source('model_wrapper_functions.R')
+
+#library(ggfortify)
+```
+
+# Load daily data
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+load('../../../cleaned_data/covid.Rda')
+covid = dplyr::select(covid, date, schoolclosure, stayathome, site) 
+covid$schoolclosure = as.numeric(as.character(covid$schoolclosure))
+covid = mutate(covid, site = ifelse(site=='PITT', 'UPMC', site))
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+
+
+risk_missing$date = risk_missing$week
+risk_missing = left_join(risk_missing, covid, by = c('date', 'site'))
+risk_missing = mutate(risk_missing, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+
+```{r}
+daily = left_join(daily, covid, by = c('date', 'site'))
+daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+
+```{r}
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+daily_long = daily %>%
+  group_by(ID) %>%
+  mutate(day_num_center = scale(day_num, center = TRUE, scale = FALSE)) %>%
+  ungroup() %>%
+  mutate(week_num_center = day_num_center/7,
+         month_num_center = day_num_center/30.4) %>%
+  pivot_longer(contains('missing_')) 
+```
+
+
+```{r}
+schoolclosure_models_daily_basis = daily_long %>% group_by(name) %>%
+  nest() %>%
+  mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ month_num_center + summerbreak + weekend + schoolclosure + site +
+                                                     (1|ID),
+                                                         family = bernoulli(link = 'logit'),
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993,
+                                                   prior = beta_prior)))
+
+schoolclosure_model_risk =brms::brm(data = risk_missing, risk_missing ~ personal_time_z + summerbreak + schoolclosure + site + 
+                                                      (1|ID), family = bernoulli(link = 'logit'),
+                                                   cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
+
+
+save(schoolclosure_models_daily_basis, schoolclosure_model_risk, file = 'model_outputs/school_closure_models.rda')
+```
+
+
+```{r}
+school_or_daily_basis = schoolclosure_models_daily_basis %>%
+  mutate(or = purrr::map(time_model, ~fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)))) %>%
+  unnest(or) %>%
+  dplyr::select(-time_model, -data)
+
+school_or_risk = schoolclosure_model_risk %>% fixef(., probs =c(0.025, 0.975)) %>%
+                                         exp() %>%
+                                         as.data.frame(.) %>%
+                                         rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
+                                         mutate(., term = row.names(.)) %>%
+  mutate(name = 'Weekly SI Survey')
+
+
+school_or = rbind(school_or_risk, school_or_daily_basis) %>%
+  dplyr::filter(term == 'schoolclosure') %>%
+  mutate(name = dplyr::recode(name,
+                              'missing_accel'='Accelerometer',
+                              'missing_gps'='GPS',
+                              'missing_keyboard'='Keyboard Input',
+                              'missing_daily'='Daily Mood Survey'))
+
+or_plot = school_or %>%
+  ggplot(data = ., aes(x = name, y = estimate, color=name)) +
+  geom_point(position = position_dodge(0.2)) + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  coord_flip() +
+  scale_y_log10() +
+  labs(y = 'School Closure Association with Missingness\nAdjusted Odds Ratio',
+       title = 'COVID-19 School Closures & Missing Data',
+       x = NULL, color = NULL) +
+  scale_color_manual(values = pal2) +
+  theme_bw() + 
+  theme(legend.position = 'none') 
+
+
+
+ggsave(or_plot, filename = '../../figures/supplement/school_closure_missingness.png', width = 6, height = 6)
+```
+
+```{r}
+ggplot(daily, aes(x = date, y = ID, fill = schoolclosure)) +
+  geom_tile() +
+  facet_grid(rows = vars(site), scales = 'free_y', drop = TRUE) +
+  theme_bw()
+
+
+schoolclosure_check = daily %>%
+  group_by(ID) %>%
+  summarise(school_closure_pct = sum(schoolclosure)/n())
+
+schoolclosure_mix = schoolclosure_check %>%
+  dplyr::filter(school_closure_pct != 0, school_closure_pct !=1)
+```
+

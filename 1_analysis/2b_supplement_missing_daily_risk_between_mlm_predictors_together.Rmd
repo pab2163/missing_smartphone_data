@@ -1,9 +1,11 @@
 ---
-title: "missing_daily_between"
+title: "Model Between-Participant Baseline Predictors of Missing Data: Supplemental Analysis With All Predictors Together In The Same Model"
 output: html_document
 date: "2022-08-23"
 ---
 
+
+# Model Between-Participant Baseline Predictors of Missing Data: Supplemental Analysis With All Predictors Together In The Same Model
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(Matrix)
@@ -25,7 +27,7 @@ source('model_wrapper_functions.R')
 options(buildtools.check = function(action) TRUE)
 ```
 
-
+# Load daily data
 ```{r}
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')

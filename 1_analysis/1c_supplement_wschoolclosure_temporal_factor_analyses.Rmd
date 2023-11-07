@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Temporal Factors - Sensitivity Check With Included School Closure Covariates"
 output: html_document
 date: "2022-08-23"
 ---
@@ -24,6 +24,10 @@ theme_set(theme_bw())
 source('model_wrapper_functions.R')
 ```
 
+
+# Define Color Palettes
+
+
 ```{r}
 # Palette from http://mkweb.bcgsc.ca/colorblind/palettes/8.color.blindness.palette.txt
 pal = c('#000000','#d55e00', '#3DB7E9', '#F748A5', '#359B73','#2271B2', '#e69f00', '#f0e442')
@@ -45,7 +49,19 @@ daily = dplyr::filter(daily, TIMEPNT==6, day_num < 200)
 ```{r}
 comparisons = 3
 conf_level_corrected = 1-(0.05/comparisons)
+```
 
+# Pull in school closure data
+```{r}
+load('../../../cleaned_data/covid.Rda')
+covid = dplyr::select(covid, date, schoolclosure, stayathome, site) 
+covid$schoolclosure = as.numeric(as.character(covid$schoolclosure))
+covid = mutate(covid, site = ifelse(site=='PITT', 'UPMC', site))
+daily = left_join(daily, covid, by = c('date', 'site'))
+daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+```{r}
 beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 
 daily_long = daily %>%
@@ -56,14 +72,10 @@ daily_long = daily %>%
          month_num_center = day_num_center/30.4) %>%
   pivot_longer(contains('missing')) 
 
-# lag missing indicators
-daily_long = daily_long %>% group_by(name, ID) %>%
-  mutate(value_lag1 = lag(value, n= 1)) %>%
-  ungroup()
 
-time_models_daily_basis_wlag = daily_long %>% group_by(name) %>%
+time_models_daily_basis_wschoolclosure = daily_long %>% group_by(name) %>%
   nest() %>%
-  mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ value_lag1 + month_num_center + summerbreak + weekend + (month_num_center + summerbreak + weekend|ID),
+  mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ schoolclosure + month_num_center + summerbreak + weekend + (month_num_center + summerbreak + weekend|ID),
                                                          family = bernoulli(link = 'logit'), 
                                                    cores = 4, chains = 4, iter = 4000, seed = 11291993,
                                                    prior = beta_prior)))
@@ -79,17 +91,19 @@ risk_week_present = mutate(risk_week_present,
     dplyr::filter(week_num <= 27, week_num > 1, TIMEPNT==6) 
 
 
-risk_week_present = risk_week_present %>%
-  group_by(ID) %>%
-  mutate(risk_missing_lag1 = lag(risk_missing, n=1)) %>%
-  ungroup()
+risk_week_present$date = risk_week_present$week
+risk_week_present = mutate(risk_week_present, site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'))
+risk_week_present = left_join(risk_week_present, covid, by = c('date', 'site'))
+risk_week_present = mutate(risk_week_present, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+risk_week_present = mutate(risk_week_present, schoolclosure = ifelse(date < '2020-01-01', 0, schoolclosure))
 
-time_model_week_risk_wlag = brms::brm(data = risk_week_present, risk_missing ~ month_num_center + summerbreak + (month_num_center + summerbreak |ID),
+
+time_model_week_risk_wschoolclosure = brms::brm(data = risk_week_present, risk_missing ~ schoolclosure + month_num_center + summerbreak + (month_num_center + summerbreak |ID),
                                                          family = bernoulli(link = 'logit'), 
                                                    cores = 4, chains = 4, iter = 4000, seed = 11291993,
                                                    prior = beta_prior)
 
-save(time_models_daily_basis_wlag, time_model_week_risk_wlag, file = 'model_outputs/design_features_predict_missingness_wlag.rda')
+save(time_models_daily_basis_wschoolclosure, time_model_week_risk_wschoolclosure, file = 'model_outputs/design_features_predict_missingness_wschoolclosure.rda')
 ```
 
 
@@ -98,14 +112,14 @@ save(time_models_daily_basis_wlag, time_model_week_risk_wlag, file = 'model_outp
 
 ## Risk OR
 ```{r}
-time_or_week_risk_uncorrected_wlag = time_model_week_risk_wlag %>% fixef(., probs =c(0.025, 0.975)) %>%
+time_or_week_risk_uncorrected_wschoolclosure = time_model_week_risk_wschoolclosure %>% fixef(., probs =c(0.025, 0.975)) %>%
                                          exp() %>%
                                          as.data.frame(.) %>%
                                          rename_cols(., colnames = c('estimate', 'Est.Error', 'conf.low', 'conf.high')) %>%
                                          mutate(., term = row.names(.)) %>%
   mutate(name = 'Weekly SI Survey', corrected = 'or_uncorrected')
 
-time_or_week_risk_corrected_wlag = time_model_week_risk_wlag %>% fixef(., probs =c((1-conf_level_corrected)/2, 
+time_or_week_risk_corrected_wschoolclosure = time_model_week_risk_wschoolclosure %>% fixef(., probs =c((1-conf_level_corrected)/2, 
                                                                  1-(1-conf_level_corrected)/2)) %>%
                                          exp() %>%
                                          as.data.frame(.) %>%
@@ -114,13 +128,13 @@ time_or_week_risk_corrected_wlag = time_model_week_risk_wlag %>% fixef(., probs 
   mutate(name = 'Weekly SI Survey', corrected = 'or_corrected')
 
 
-time_or_week_risk_wlag = rbind(time_or_week_risk_corrected_wlag, time_or_week_risk_uncorrected_wlag)
+time_or_week_risk_wschoolclosure = rbind(time_or_week_risk_corrected_wschoolclosure, time_or_week_risk_uncorrected_wschoolclosure)
 
 ```
 
 ### OR for daily time models
 ```{r}
-time_or_daily_basis_brm_wlag = time_models_daily_basis_wlag %>%
+time_or_daily_basis_brm_wschoolclosure = time_models_daily_basis_wschoolclosure %>%
   mutate(or_corrected = purrr::map(time_model, ~fixef(., probs =c((1-conf_level_corrected)/2, 
                                                                  1-(1-conf_level_corrected)/2)) %>%
                                          exp() %>%
@@ -141,10 +155,9 @@ time_or_daily_basis_brm_wlag = time_models_daily_basis_wlag %>%
 ## Combine outputs & plot
 
 ```{r}
-time_or_daily_basis_wlag = rbind(time_or_daily_basis_brm_wlag, time_or_week_risk_wlag)
+time_or_daily_basis_wschoolclosure = rbind(time_or_daily_basis_brm_wschoolclosure, time_or_week_risk_wschoolclosure)
 
-
-time_or_daily_basis_wlag =  time_or_daily_basis_wlag %>%
+time_or_daily_basis_wschoolclosure =  time_or_daily_basis_wschoolclosure %>%
   mutate(term = dplyr::recode(term,
                               'weekend'='Weekend > Week Days',
                               'summerbreak1'='Summer Break > School Year',
@@ -154,15 +167,17 @@ time_or_daily_basis_wlag =  time_or_daily_basis_wlag %>%
                               'missing_gps'='GPS',
                               'missing_keyboard'='Keyboard Input',
                               'missing_daily'='Daily Mood Survey'))
+```
 
-or_plot_wlag = time_or_daily_basis_wlag %>%
+```{r}
+or_plot_wschoolclosure = time_or_daily_basis_wschoolclosure %>%
   dplyr::filter(corrected == 'or_corrected') %>%
-  dplyr::filter(! term %in% c('Intercept', 'sd__(Intercept)', 'value_lag1')) %>%
+  dplyr::filter(! term %in% c('Intercept', 'sd__(Intercept)', 'schoolclosure')) %>%
   ggplot(data = ., aes(x = term, y = estimate, color=name)) +
   geom_point(position = position_dodge(0.2)) + 
-  geom_errorbar(data = dplyr::filter(time_or_daily_basis_wlag,
+  geom_errorbar(data = dplyr::filter(time_or_daily_basis_wschoolclosure,
                                      corrected == 'or_uncorrected',
-                                     !term %in% c('Intercept', 'sd__(Intercept)', 'value_lag1')),
+                                     !term %in% c('Intercept', 'sd__(Intercept)', 'schoolclosure')),
                                      aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2),
                 lwd = 1) +
   geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, position = position_dodge(0.2)) +
@@ -171,12 +186,8 @@ or_plot_wlag = time_or_daily_basis_wlag %>%
   scale_y_log10() +
   labs(y = 'Association with missingness\nAdjusted Odds Ratio',
        x = NULL, color = NULL) +
-  scale_color_manual(values = pal2) +
-  theme(legend.position = 'none')
+  scale_color_manual(values = pal2)
 
 
-ggsave(or_plot_wlag, filename = '../../figures/supplement/temporal_trends_or_wlag.png', height = 5, width = 4)
-
+ggsave(or_plot_wschoolclosure, filename = '../../figures/supplement/temporal_trends_or_wschoolclosure.png', height = 5, width = 6)
 ```
-
-
