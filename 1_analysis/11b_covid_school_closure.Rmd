@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Missing data as a function of Covid-19 public school closures (local)"
 output: html_document
 date: "2022-08-23"
 ---
@@ -27,7 +27,7 @@ source('model_wrapper_functions.R')
 #library(ggfortify)
 ```
 
-# Load daily data
+# Load daily data & combine with school closures
 
 ```{r}
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
@@ -59,7 +59,7 @@ risk_missing = left_join(risk_missing, covid, by = c('date', 'site'))
 risk_missing = mutate(risk_missing, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
 ```
 
-
+# Wrangle data
 ```{r}
 daily = left_join(daily, covid, by = c('date', 'site'))
 daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
@@ -67,8 +67,6 @@ daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosu
 
 
 ```{r}
-beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
-
 daily_long = daily %>%
   group_by(ID) %>%
   mutate(day_num_center = scale(day_num, center = TRUE, scale = FALSE)) %>%
@@ -79,7 +77,10 @@ daily_long = daily %>%
 ```
 
 
+# Run models
+
 ```{r}
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 schoolclosure_models_daily_basis = daily_long %>% group_by(name) %>%
   nest() %>%
   mutate(time_model =  purrr::map(data, ~brms::brm(data = ., value ~ month_num_center + summerbreak + weekend + schoolclosure + site +
@@ -97,6 +98,7 @@ save(schoolclosure_models_daily_basis, schoolclosure_model_risk, file = 'model_o
 ```
 
 
+# Calculate odds ratios   
 ```{r}
 school_or_daily_basis = schoolclosure_models_daily_basis %>%
   mutate(or = purrr::map(time_model, ~fixef(., probs =c(0.025, 0.975)) %>%
@@ -123,6 +125,12 @@ school_or = rbind(school_or_risk, school_or_daily_basis) %>%
                               'missing_keyboard'='Keyboard Input',
                               'missing_daily'='Daily Mood Survey'))
 
+
+```
+
+# Plot odds ratios
+
+```{r}
 or_plot = school_or %>%
   ggplot(data = ., aes(x = name, y = estimate, color=name)) +
   geom_point(position = position_dodge(0.2)) + 
@@ -140,20 +148,5 @@ or_plot = school_or %>%
 
 
 ggsave(or_plot, filename = '../../figures/supplement/school_closure_missingness.png', width = 6, height = 6)
-```
-
-```{r}
-ggplot(daily, aes(x = date, y = ID, fill = schoolclosure)) +
-  geom_tile() +
-  facet_grid(rows = vars(site), scales = 'free_y', drop = TRUE) +
-  theme_bw()
-
-
-schoolclosure_check = daily %>%
-  group_by(ID) %>%
-  summarise(school_closure_pct = sum(schoolclosure)/n())
-
-schoolclosure_mix = schoolclosure_check %>%
-  dplyr::filter(school_closure_pct != 0, school_closure_pct !=1)
 ```
 

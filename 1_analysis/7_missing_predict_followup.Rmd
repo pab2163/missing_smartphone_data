@@ -30,7 +30,6 @@ load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 ```
 
 
-
 ```{r}
 daily = dplyr::filter(daily, TIMEPNT==6, day_num <=200)
 ```
@@ -178,7 +177,7 @@ ols_6_coefs_risk = ols_month6_models(formula = risk_pct_formula, df = risk_long,
 
 ```
 
-
+# Combine coefficients and plot (supplementary figure)
 
 ```{r}
 combined_coef = rbind(ols_6_coefs_accel, 

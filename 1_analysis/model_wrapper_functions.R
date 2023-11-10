@@ -1,6 +1,8 @@
+# Custom color palettes - should be colorblind accessible  (https://jrnold.github.io/ggthemes/reference/colorblind.html)
 pal = c('#000000','#d55e00', '#3DB7E9', '#F748A5', '#359B73','#2271B2', '#e69f00', '#f0e442')
 pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
 
+# Separate baseline models of missing data using glmer (NOT USED IN MAIN ANALYSES-MODELS OFTEN DO NOT CONVERGE)
 baseline_separate_models_with_missingness_glmer = function(df, model_formula_template, clinical_predictors, conf_level_corrected, bayes=FALSE){
   # convert to xtra long format
   df_long = df %>%
@@ -25,6 +27,7 @@ baseline_separate_models_with_missingness_glmer = function(df, model_formula_tem
   return(model_frame)
 }
 
+# Function for checking model convergence of many models nested in a df
 check_convergences = function(model_df){
   model_df = model_df %>%
     mutate(convergence_message = purrr::map(model, ~summary(.)$optinfo$conv$lme4$messages))
@@ -87,9 +90,6 @@ pull_separate_model_odds_ratios = function(model_df, conf_level_corrected, bayes
     unnest(or_corrected) %>%
     dplyr::select(-data, -model)  %>%
     mutate(or_type = 'corrected')
-    
-  #print(or_frame_uncorrected)
-  #print(or_frame_corrected)
   
   or_frame = rbind(or_frame_corrected, or_frame_uncorrected) %>%
     dplyr::select(-or_uncorrected, -or_corrected)
@@ -217,7 +217,7 @@ baseline_predictors_missingness_or_plot = function(or_df, m, bayes=FALSE){
 }
 
 
-
+# Sociodemographic model function
 baseline_sociodemographic_model_with_missingness_glmer = function(model_formula, df){
   sociodem_model = df %>%
     lme4::glmer(data = ., formula = model_formula, family = binomial(link = 'logit'))
@@ -233,7 +233,7 @@ baseline_sociodemographic_model_with_missingness_brm = function(model_formula, d
   return(sociodem_model)
 }
 
-
+# Extract ORs from sociodemographic model
 baseline_sociodemographic_model_odds_ratio = function(sociodem_model, type, conf_level_corrected, bayes=FALSE){
   
   if (bayes==FALSE){
@@ -266,6 +266,7 @@ baseline_sociodemographic_model_odds_ratio = function(sociodem_model, type, conf
   
 }
 
+# Make OR plot for sociodemographic variables
 make_sociodem_or_plot = function(sociodem_or_df, m, bayes=FALSE){
   sociodem_or_df = sociodem_or_df %>%
     dplyr::filter(!grepl('Intercept', term), !term %in% c('personal_time_z', 'weekend1', 'weekend'), !grepl('summer', term)) %>%

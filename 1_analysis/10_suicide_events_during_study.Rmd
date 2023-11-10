@@ -1,8 +1,10 @@
 ---
-title: "stb_during_study"
+title: "Analyses of Missing Data As a Function of Suicidal Events during the Study"
 output: html_document
 date: "2022-08-23"
 ---
+
+# All analyses in this script are between-person
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -321,6 +323,7 @@ by_event_risk = risk_missing %>%
 by_event_all = left_join(by_event, by_event_risk, by = c('ID', 'event_cat1_participant', 'event_cat1_label'))
 ```
 
+# Plots of raw data
 
 ```{r}
 pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
@@ -337,7 +340,6 @@ suicidal_behavior_missingngess = by_event_all %>%
   labs(y = '% Observations Mising', x = 'Participants With 1+ Suicidal Events Versus No Suicidal Events During the Study Period') +
   theme(legend.position = 'none') +
   facet_grid(~name) +
-  #scale_fill_viridis_d(end = 0.8) +
   scale_fill_manual(values= c(
       "Accelerometer" = pal2[1], 
       "Daily Mood Survey" = pal2[2], 
@@ -359,6 +361,7 @@ suicidal_behavior_missingngess = by_event_all %>%
 ggsave(suicidal_behavior_missingngess, file = '../../figures/supplement/boxplot_stb_during_study_vis.png', height = 3, width = 9)
 ```
 
+# Same analysis using `lm()`
 
 ```{r}
 event_lm = by_event_all %>%
@@ -368,7 +371,6 @@ event_lm = by_event_all %>%
   mutate(model = purrr::map(data, ~lm(data =., value ~ event_cat1_label)),
          coef = purrr::map(model, ~broom::tidy(.))) %>%
   unnest(coef)
-
 
 
 event_lm %>%

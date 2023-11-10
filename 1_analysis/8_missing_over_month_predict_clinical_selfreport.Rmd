@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Within-participant associations betwen missing data in a 30-day period and subsequent change in self-report measures"
 output: html_document
 date: "2022-08-23"
 ---
@@ -118,6 +118,8 @@ save(models_month_missingness_predict_clinical, coef_month_missingness_predict_c
 load('model_outputs/month_missingness_predict_clinical.rda')
 ```
 
+# Extract coefficients
+
 ```{r}
 coef_month_missingness_predict_clinical_corrected = models_month_missingness_predict_clinical %>%
   mutate(coef = purrr::map(model, ~broom::tidy(., conf.level = conf_level_corrected))) %>%
@@ -148,7 +150,11 @@ coef_month_missingness_predict_clinical = mutate(coef_month_missingness_predict_
     conf.high*conf.low <= 0 ~ '',
     conf.high_corrected*conf.low_corrected > 0 ~ '#'
   ))
+```
 
+# Make plot of coefficients
+
+```{r}
 pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
 
 month_missingness_predict_clinical_plot = coef_month_missingness_predict_clinical %>%
@@ -169,5 +175,4 @@ month_missingness_predict_clinical_plot = coef_month_missingness_predict_clinica
 
 ggsave(month_missingness_predict_clinical_plot, file = '../../figures/supplement/month_missingness_predict_clinical.png',
        width = 7, height = 6)
-
 ```

@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Analyses of whether missing data precedes or follows changes in daily mood"
 output: html_document
 date: "2022-08-23"
 ---
@@ -51,6 +51,7 @@ risk_missing = risk_week_present %>%
   left_join(., self_report_baseline, by = 'ID')
 ```
 
+# Create lagged and scaled variables
 
 ```{r}
 daily_r = daily %>%
@@ -73,7 +74,7 @@ daily_long = daily_r %>%
 
 ```
 
-# Daily predict missingness next day
+# Daily mood predict missingness next day
 
 ```{r daily_pred_missing_models}
 daily_predict_missingness_models = daily_long %>%
@@ -118,7 +119,7 @@ save(daily_predict_missingness_models, daily_predict_missingness_models_lag1,
 ```
 
 
-# Missingness day before predict daily today
+# Missingness day before predict daily mood today
 
 ```{r missing_pred_daily_models}
 missingness_predict_daily_models_lag1 = daily_long %>%
@@ -241,6 +242,7 @@ p_next = daily_predict_missingness_or_lag1 %>%
   theme(legend.position = 'none') 
 ```
 
+# Save plots
 
 ```{r saveplot}
 missingness_precede_follow_daily_mood = cowplot::plot_grid(p_prior, p_same, p_next, ncol = 3, labels = c('A', 'B', 'C'))

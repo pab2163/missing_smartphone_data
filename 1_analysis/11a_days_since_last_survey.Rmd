@@ -1,5 +1,5 @@
 ---
-title: "missing_daily_between"
+title: "Supplementary Analysis of Passive Missingness as a Function of Days since the Last Completed Daily Mood Survey"
 output: html_document
 date: "2022-08-23"
 ---
@@ -22,8 +22,6 @@ library(ggdist)
 library(scipub)
 library(brms)
 library(GGally)
-
-#library(ggfortify)
 ```
 
 # Load daily data
@@ -50,7 +48,7 @@ risk_missing = risk_week_present %>%
   left_join(., self_report_baseline, by = 'ID')
 ```
 
-
+# Function to get number of observations back since last non-NA 
 
 ```{r}
 get_prev_non_na <- function(x) {
@@ -68,15 +66,17 @@ get_prev_non_na <- function(x) {
   }
   output
 }
+```
 
 
+# Make plot of missing passive data as a function of days since last non-NA daily mood survey
+
+```{r}
 daily = mutate(daily) %>%
   group_by(ID) %>%
   arrange(date) %>%
   mutate(day_num_last_daily = get_prev_non_na(daily)) %>%
   ungroup()
-
-
 
 
 daily_long2 = daily %>%
@@ -102,7 +102,12 @@ days_since_last_survey_plot = daily_long2 %>%
 
 
 ggsave(days_since_last_survey_plot, filename = '../../figures/supplement/days_since_last_survey.png', height = 5, width = 8)
+```
 
+
+# Model this statistically
+
+```{r}
 daily_long_mod = daily %>%
   pivot_longer(c('missing_accel', 'missing_gps', 'missing_keyboard')) %>%
   group_by(name) %>%
