@@ -12,7 +12,7 @@ Analyses of Missing Experience Sampling &amp; Passive Smartphone Sensor Data in 
 | [0_setup](0_setup)      | `3_consistency_reliability.Rmd` |  Calculations of internal consistency and reliability for self-report measures |
 | [1_analysis](1_analysis)      | `0_descriptive_results.Rmd`| Descriptive analyses, including associations between missingness of  |
 | [1_analysis](1_analysis)      | `1a-c`|   **Aim 1** analyses of time-varying associations between temporal factors (day of week, month, time since baseline) and missing data  |
-| [1_analysis](1_analysis)      | `2a-h`|   **Aim 1** models of between-participant associations between clinical and sociodemographic variables and missing data |
+| [1_analysis](1_analysis)      | `2a-i`|   **Aim 1** models of between-participant associations between clinical and sociodemographic variables and missing data |
 | [1_analysis](1_analysis)      | `3_supplement_baseline_cox_models.Rmd`|  **Aim 1** Cox models looking at associations between baseline clinical & sociodemographic variables and time to drop out from smartphone data collection  |
 | [1_analysis](1_analysis)      | `4a_clinical_selfreport_predict_missing_over_month.Rmd`|   **Aim 1** longitudinal analyses of whether changes in self-report clinical measures predict changes in missing data over the next 30 days |
 | [1_analysis](1_analysis)      | `5a_daily_mood_weekly_si_autocor.Rmd`| Models of autocorrelation of daily mood, weekly suicidal ideation frequency, and their missingness|
@@ -23,4 +23,7 @@ Analyses of Missing Experience Sampling &amp; Passive Smartphone Sensor Data in 
 | [1_analysis](1_analysis)      | `10_suicide_events_during_study.Rmd`|   **Aim 3** analyses of between-participant associations between missing data and suicidal events during the 6-month study period|
 | [1_analysis](1_analysis)      | `11a_days_since_last_survey.Rmd` |   Supplemental analyses of missingness of passive smartphone sensor data as a function of time since the last observed daily mood survey response|
 | [1_analysis](1_analysis)      | `11b_covid_school_closure.Rmd` |   Supplemental analyses of missing data as a function of local public high school closures due to Covid-19 |
+| [1_analysis](1_analysis)      | `12a-b` |   Predictive modeling analyses of misisng survey data using train/test splits |
 | [1_analysis](1_analysis)      | `model_wrapper_functions.R` |  Custom helper functions used in modeling, plotting, and wrangling data across multiple analyses |
+| [1_analysis](1_analysis)      | `run_all.sh` |  Knits all markdowns in the `1_analysis` folder |
+
