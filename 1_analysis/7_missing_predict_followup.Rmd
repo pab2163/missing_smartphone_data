@@ -19,6 +19,7 @@ library(broom.mixed)
 library(lmerTest)
 library(scales)
 library(ggdist)
+library(brms)
 source('model_wrapper_functions.R')
 ```
 
@@ -41,7 +42,8 @@ daily = dplyr::filter(daily, TIMEPNT==6, day_num <=200)
 load('../../cleaned_data/cleaned_baseline_data.rda')
 
 self_report_6 = self_report_6 %>%
-  mutate(across(c(contains('_change'), ends_with('_6')), scale))
+  mutate(across(c(contains('_change'), ends_with('_6')), scale),
+         ID=as.character(ID))
 
 daily = left_join(daily, dplyr::select(self_report_6, -siteCUMC), by = 'ID')
 
@@ -222,7 +224,8 @@ fig6_timepoint6 = combined_coef %>%
   geom_hline(yintercept = 0, lty = 2) +
   labs(color = NULL) +
   scale_color_manual(values = pal2) +
-  facet_grid(~variable_category)
+  facet_grid(~variable_category) +
+  theme_bw()
 
 
 ggsave(fig6_timepoint6, filename ='../../figures/fig6.1_missingness_predict_6mo_clinical_acuity.png', width = 7, height = 5)

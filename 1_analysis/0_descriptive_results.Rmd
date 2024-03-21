@@ -22,6 +22,7 @@ library(ggdist)
 library(scipub)
 library(sjPlot)
 library(brms)
+library(psych)
 beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 ```
 
@@ -30,7 +31,7 @@ beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 ```{r}
 load('../../cleaned_data/cleaned_data_for_daily_models.rda')
 load('../../cleaned_data/cleaned_baseline_data.rda')
-load('../../../../Wrangling/Self_Report/data/self_report_07_19_2023.Rda')
+load('../../../../Wrangling/Self_Report/data/self_report_02_07_2024.Rda')
 ```
 
 
@@ -293,4 +294,62 @@ participants_descriptive_missing_all_datatypes_plt = pct_missing_combined %>%
 
 
 ggsave(participants_descriptive_missing_all_datatypes_plt, filename = '../../figures/supplement/descriptive_all_missing_by_participant.png', height = 2, width = 10)
+```
+
+# Sexual Orientation
+
+demooo_11 is sexual orientation
+
+"1= Heterosexual
+2= Gay or lesbian
+3= Bisexual or pansexual
+4= Asexual
+5= Not sure
+6= Other
+99= Unknown or not reported"
+```{r}
+nda_demog = read.csv('/Volumes/auerbachlab/Columbia/MAPS_Data/NDA/July_2023/Existing_Structures/Interviews/DataScientists_DONE/demo02.csv', skip=1)
+
+
+table(nda_demog$demooo_11)
+
+non_na = sum(nda_demog$demooo_11 %in% 1:6)
+
+table(nda_demog$demooo_11[nda_demog$demooo_11 %in% 1:6]) / non_na
+```
+
+# Autocorrelation of missingness (odds ratios)
+```{r}
+daily_for_autocor = daily %>%
+  group_by(ID) %>%
+  mutate(missing_daily_lag1 = lag(missing_daily, n =1),
+         missing_keyboard_lag1 = lag(missing_keyboard, n =1),
+         missing_gps_lag1 = lag(missing_gps, n =1),
+         missing_accel_lag1 = lag(missing_accel, n =1)) %>%
+  ungroup() %>%
+  dplyr::select(ID, date, contains('missing'))
+
+
+daily_autocor = lme4::glmer(data = daily_for_autocor, missing_daily ~ missing_daily_lag1 + (1|ID),
+                            family = binomial(link = 'logit'))
+
+keyboard_autocor = lme4::glmer(data = daily_for_autocor, missing_keyboard ~ missing_keyboard_lag1 + (1|ID),
+                            family = binomial(link = 'logit'))
+
+gps_autocor = lme4::glmer(data = daily_for_autocor, missing_gps ~ missing_gps_lag1 + (1|ID),
+                            family = binomial(link = 'logit'))
+
+accel_autocor = lme4::glmer(data = daily_for_autocor, missing_accel ~ missing_accel_lag1 + (1|ID),
+                            family = binomial(link = 'logit'))
+
+
+daily_autocor_or = broom.mixed::tidy(daily_autocor, exponentiate=TRUE, conf.int=TRUE) %>% mutate(type = 'daily')
+keyboard_autocor_or = broom.mixed::tidy(keyboard_autocor, exponentiate=TRUE, conf.int=TRUE) %>% mutate(type = 'keyboard')
+gps_autocor_or = broom.mixed::tidy(gps_autocor, exponentiate=TRUE, conf.int=TRUE) %>% mutate(type = 'gps')
+accel_autocor_or = broom.mixed::tidy(accel_autocor, exponentiate=TRUE, conf.int=TRUE) %>% mutate(type = 'accel')
+
+autocor_or_combined = rbind(daily_autocor_or, keyboard_autocor_or, gps_autocor_or, accel_autocor_or) %>%
+  dplyr::filter(grepl('missing', term))
+
+autocor_or_combined
 ```

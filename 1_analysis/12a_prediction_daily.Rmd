@@ -1,0 +1,212 @@
+---
+title: "Predicting missing daily mood survey data with train/test splits and calculating AUC"
+output: html_document
+date: "Feb 9, 2024"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+library(glmmTMB)
+source('model_wrapper_functions.R')
+```
+
+# Load daily data & clean
+
+A little bit of cleaning
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+load('../../../cleaned_data/covid.Rda')
+covid = dplyr::select(covid, date, schoolclosure, stayathome, site) 
+covid$schoolclosure = as.numeric(as.character(covid$schoolclosure))
+covid = mutate(covid, site = ifelse(site=='PITT', 'UPMC', site))
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+
+
+risk_missing$date = risk_missing$week
+risk_missing = left_join(risk_missing, covid, by = c('date', 'site'))
+risk_missing = mutate(risk_missing, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+# Wrangle data
+```{r}
+daily = left_join(daily, covid, by = c('date', 'site'))
+daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+
+
+sleep = read_csv('../../cleaned_data/daily_sleep_jackie_cleaning.csv') %>%
+  dplyr::select(-`...1`,date = dt_feature, -daily)
+
+daily = left_join(daily, mutate(sleep, ID = as.character(ID)), by = c('ID', 'date')) 
+
+```
+
+
+```{r}
+# Remove days after 200 days, participants who haven't finished study
+daily = dplyr::filter(daily, day_num <= 200, TIMEPNT==6) %>%
+    mutate(missing_all_passive = missing_gps +  missing_accel + missing_keyboard == 3, TRUE, FALSE) # Daily variable for whether all passive smartphone measures are miss
+
+# how many iterations for train/test
+n_iter = 1000
+```
+
+
+# Splitting by time (Within-participant validation)
+
+* Models are actually only trained ONCE here on first half of observations -- leaving out future observations
+* But we take repeated subsamples (70% of the participants) of the left-out testing data (last half of observations) to calculate uncertainty. 
+* Resampling WITHOUT replacement because sampling with replacement may do some strange things to AUC metric calculation...
+
+
+## Data Splitting & Model Training
+```{r}
+# First half of dates for each participant
+daily_train = daily %>%
+  group_by(ID) %>%
+  dplyr::filter(day_num <= max(day_num)/2) %>%
+  ungroup()
+
+# Second half of dates for each participant
+daily_test = daily %>%
+  group_by(ID) %>%
+  dplyr::filter(day_num > max(day_num)/2) %>%
+  ungroup()
+
+
+# Fit models to first half of dates
+m_baseline1 = glmmTMB(data = daily_train, missing_daily ~ 1 + (1|ID), family = binomial)
+
+m_clinical1 = glmmTMB(data = daily_train,
+                           missing_daily ~ interview_age_years + iPhone + Asian + White + Black + hispanic + sexM + siteCUMC + 
+                             SHAPS_TOT_r_i + MFQ_i + SCARED_i + SSI19_i + INQ_burdenensomeness_i + comorbidity_current + current_medication + 
+                             current_therapy  + visit_er_pastyear + SITBI_SB_ever + SITBI_engaged_nssi_ever + (1|ID), family = binomial)
+
+m_temporal1 = glmmTMB(data = daily_train,
+                           missing_daily ~ personal_time_z + summerbreak + weekend + schoolclosure  + missing_all_passive + (1|ID), family = binomial)
+
+```
+
+## Iterative model validation
+
+Get repeated random samples of 70% of the participants for which to calculated AUC on 2nd half of dates
+```{r}
+# initiatlize dataframe for testing outputs
+auc_results_df_within = data.frame(iter = 1:n_iter, 
+                    auc_intercepts_only = NA,
+                    auc_baseline_clinical = NA, 
+                    auc_temporal = NA)
+                    
+
+# iteratively get auc with test data from 70% of participants 
+for (iter in 1:n_iter){
+  set.seed(iter)
+  print(iter)
+  
+  # randomly sample 70% of participants
+  within_test_id = sample(unique(daily_test$ID), 
+                    size = round(length(unique(daily$ID))*.7),
+                    replace = FALSE)
+  daily_test_sample = dplyr::filter(daily_test, ID %in% within_test_id)
+  
+  # pull AUC values for each model
+  auc_results_df_within$auc_intercepts_only[iter] = pROC::auc(daily_test_sample$missing_daily, predict(m_baseline1, newdata=daily_test_sample, allow.new.levels = FALSE, type = 'response'))
+  auc_results_df_within$auc_baseline_clinical[iter] = pROC::auc(daily_test_sample$missing_daily, predict(m_clinical1, newdata=daily_test_sample, allow.new.levels = FALSE, type = 'response'))
+  auc_results_df_within$auc_temporal[iter] = pROC::auc(daily_test_sample$missing_daily, predict(m_temporal1, newdata=daily_test_sample, allow.new.levels = FALSE, type = 'response'))
+}
+
+within_prediction_plot = auc_results_df_within %>%
+  pivot_longer(-iter) %>%
+  dplyr::mutate(name = dplyr::recode(name, 'auc_baseline_clinical'='Baseline Clinical +\nSociodemographic Features',
+                                     'auc_intercepts_only'=' Intercepts Only',
+                                     'auc_temporal'='Temporal Features')) %>%
+  ggplot(data = ., aes(x = name, y = value)) +
+  tidybayes::stat_dist_halfeye() + 
+  geom_hline(yintercept = 0.5, lty = 2) + 
+  labs(x = 'Logistic Regression Trained on First 3 Months', y = 'AUC\nTested on Last 3 Months', title = '') +
+  theme_bw()
+```
+
+
+# Split by ID (Between-participant validation)
+
+Again, resampling without replacement (repeated random 70/30% train-test splits)
+
+
+```{r}
+auc_results_df_between = data.frame(iter = 1:n_iter, 
+                    auc_baseline_clinical = NA, 
+                    auc_temporal = NA)
+                    
+
+for (iter in 1:n_iter){
+  set.seed(iter)
+  print(iter)
+
+  # 70/30 split of participants to train/test
+  train_id = sample(unique(daily$ID), 
+                    size = round(length(unique(daily$ID))*.7))
+  
+  test_id = unique(daily$ID)[!unique(daily$ID) %in% train_id]
+  
+  daily_train_between_split = daily %>%
+    dplyr::filter(ID %in% train_id)
+  
+  daily_test_between_split = daily %>%
+    group_by(ID) %>%
+    dplyr::filter(ID %in% test_id) %>%
+    ungroup()
+
+  # train models on included participants
+  m_baseline_clinical = glmmTMB(data = daily_train_between_split,
+                           missing_daily ~ interview_age_years + iPhone + Asian + White + Black + hispanic + sexM + siteCUMC + 
+                             SHAPS_TOT_r_i + MFQ_i + SCARED_i + SSI19_i + INQ_burdenensomeness_i + comorbidity_current + current_medication + 
+                             current_therapy  + visit_er_pastyear + SITBI_SB_ever + SITBI_engaged_nssi_ever + (1|ID),
+                           family = binomial)
+  
+  m_temporal = glmmTMB(data = daily_train_between_split,
+                           missing_daily ~ personal_time_z + summerbreak + weekend + schoolclosure + missing_all_passive + (1|ID), family = binomial)
+  
+  # test models on held out participants
+  auc_results_df_between$auc_baseline_clinical[iter] = pROC::auc(daily_test_between_split$missing_daily, predict(m_baseline_clinical, newdata=daily_test_between_split, allow.new.levels=TRUE))
+  auc_results_df_between$auc_temporal[iter] = pROC::auc(daily_test_between_split$missing_daily, predict(m_temporal, newdata=daily_test_between_split, allow.new.levels=TRUE))
+}
+```
+
+# Save outputs
+
+```{r}
+save(auc_results_df_between, auc_results_df_within, file = 'model_outputs/prediction_results_daily.rda')
+```
+

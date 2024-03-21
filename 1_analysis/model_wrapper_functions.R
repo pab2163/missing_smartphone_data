@@ -1,6 +1,7 @@
 # Custom color palettes - should be colorblind accessible  (https://jrnold.github.io/ggthemes/reference/colorblind.html)
 pal = c('#000000','#d55e00', '#3DB7E9', '#F748A5', '#359B73','#2271B2', '#e69f00', '#f0e442')
 pal2 = c(rgb(0,0,0), rgb(230/255, 159/255,0), rgb(86/255,180/255,233/255), rgb(204/255, 121/255, 167/255), rgb(0, 158/255, 115/255), rgb(0, 114/255, 178/255))
+beta_prior = c(prior_string("student_t(3, 0, 10)", class = "b"))
 
 # Separate baseline models of missing data using glmer (NOT USED IN MAIN ANALYSES-MODELS OFTEN DO NOT CONVERGE)
 baseline_separate_models_with_missingness_glmer = function(df, model_formula_template, clinical_predictors, conf_level_corrected, bayes=FALSE){
@@ -37,7 +38,7 @@ check_convergences = function(model_df){
 
 
 # Pull out tidy coefficients and CIs with/without correction
-pull_separate_model_coefs = function(model_df, conf_level_corrected){
+pull_separate_model_coefs = function(model_df, conf_level_corrected, bayes=TRUE){
   model_df = model_df %>%
     mutate(coef_uncorrected = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = 0.95)),
            coef_corrected = purrr::map(model, ~broom::tidy(., conf.int=TRUE, conf.level = conf_level_corrected)))
@@ -108,6 +109,16 @@ or_pipeline = function(df, model_formula_template, clinical_predictors, conf_lev
   return(list(models_df=models_df, or_df=or_df))
 }
 
+
+coef_pipeline = function(df, model_formula_template, clinical_predictors, conf_level_corrected, bayes=FALSE){
+  models_df = baseline_separate_models_with_missingness_glmer(df = df, 
+                                                              model_formula_template = model_formula_template, 
+                                                              clinical_predictors = clinical_predictors,
+                                                              bayes=bayes)
+  models_df = check_convergences(models_df)
+  coef_df = pull_separate_model_coefs(models_df, conf_level_corrected = conf_level_corrected, bayes=bayes)
+  return(list(models_df=models_df, coef_df=coef_df))
+}
 
 # Create OR plot
 baseline_predictors_missingness_or_plot = function(or_df, m, bayes=FALSE){

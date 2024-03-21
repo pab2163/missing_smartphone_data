@@ -343,3 +343,7 @@ cowplot::save_plot(passive_panel, filename = '../../figures/fig5.2_missing_daily
                    base_height = 8, base_width = 9)
 ```
 
+
+```{r}
+
+```

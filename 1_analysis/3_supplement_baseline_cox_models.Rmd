@@ -144,7 +144,9 @@ cox_models = cox_long %>%
 cox_coefs = cox_models %>%
   unnest(coef) %>%
   dplyr::select(-model, -data)
+```
 
+```{r}
 # clean up model outputs for plot
 cox_coefs = cox_coefs %>%
     dplyr::filter(term == 'scaled_predictor') %>%
@@ -175,7 +177,6 @@ cox_coefs = cox_coefs %>%
                            'siteCUMCTRUE'='Site (NYC)', 
                            'current_therapy'='Current Therapy',
                            'current_medication'='Current Medication'),
-
       continuous = ifelse(variable_category == 'Psychopathology', '*', ''),
       name = ifelse(variable_category %in% c('Service', 'SITBI', 'Psychopathology'), paste0(name, continuous), name))
 
@@ -197,4 +198,6 @@ cox_coef_plot = cox_coefs %>%
 ggsave(cox_coef_plot, filename = '../../figures/supplement/cox_model_hazard_ratios.png', width = 8, height = 8)
 ```
 
+```{r}
 
+```

@@ -19,6 +19,7 @@ library(broom.mixed)
 library(lmerTest)
 library(scales)
 library(brms)
+library(ggrepel)
 theme_set(theme_bw())
 source('model_wrapper_functions.R')
 ```
@@ -257,7 +258,8 @@ risk_week_num_proportions = risk_week_present %>%
             upr = p + 2*se) %>%
   mutate(name = 'Weekly SI Survey', 
          week_num = week_num - 1,
-         day_num = week_num*7)
+         day_num = week_num*7) %>%
+  dplyr::filter(week_num <= 25)
 
 daily_day_num_proportions = rbind(daily_day_num_proportions, risk_week_num_proportions)
 
@@ -270,16 +272,18 @@ time_ends = dplyr::filter(daily_day_num_proportions, week_num ==24) %>%
   group_by(name) %>%
   summarise(p = mean(p), week_num =25)
 
+daily_day_num_proportions = dplyr::filter(daily_day_num_proportions, !(name == 'Weekly SI Survey' & week_num == 0))
+
 timeplt = ggplot(daily_day_num_proportions, aes(x = week_num, y = p)) +
   geom_hline(yintercept = 0.5, lty = 2) +
   geom_line(aes(color = name), lwd = 1) +
   labs(y = 'P(Missing)', x = "Weeks since baseline (person-weeks)\n", color= NULL) +
   scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25)) +
   theme(legend.position = 'right') +
-  geom_label_repel(
+  ggrepel::geom_label_repel(
     aes(label = format(round(p,2), nsmall=2), color = name), data = time_starts,
     fontface ="plain",  size = 3, direction = 'both', point.padding = 1, show.legend =FALSE) +
-  geom_label_repel(
+  ggrepel::geom_label_repel(
     aes(label = format(round(p,2), nsmall=2), color = name), data = time_ends,
     fontface ="plain",  size = 3, direction = 'both', show.legend =FALSE) +
   scale_color_manual(values = pal2)
@@ -311,8 +315,10 @@ m_week_month_keyboard = brms::brm(data = daily, missing_keyboard ~ dayofweek + f
 m_week_month_accel = brms::brm(data = daily, missing_accel ~ dayofweek + factor(month) + personal_time_z + (1 |ID), 
                            family = bernoulli(link = 'logit'), cores = 4, chains = 4, iter = 4000, seed = 11291993, prior = beta_prior)
 
+```
 
-summary(m_week_month_keyboard_t)
+
+```{r}
 save(m_weds_daily, m_week_month, m_week_month_keyboard, m_week_month_accel, file = 'model_outputs/day_of_week_month_models.rda')
 ```
 
@@ -338,7 +344,10 @@ week_daily = emmeans::emmeans(m_week_month, specs = 'dayofweek', type = 'respons
 week_keyboard = emmeans::emmeans(m_week_month_keyboard, specs = 'dayofweek', type = 'response') %>%
   data.frame() %>%
   mutate(type = 'Daily Mood')
+```
 
+
+```{r}
 weekplt = week_daily %>%
   dplyr::filter(type == 'Daily Mood') %>%
   ggplot(data = ., aes(x = dayofweek, y = response)) +

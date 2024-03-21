@@ -57,6 +57,8 @@ risk_missing = risk_week_present %>%
 risk_missing$date = risk_missing$week
 risk_missing = left_join(risk_missing, covid, by = c('date', 'site'))
 risk_missing = mutate(risk_missing, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+
+
 ```
 
 # Wrangle data

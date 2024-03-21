@@ -128,7 +128,7 @@ passive_predict_daily_missing_models_wschoolclosure = daily_long %>%
                                         family = bernoulli(link = 'logit'),
                                         chains = 4, cores = 4, iter = 2000, seed = 11291993, prior = beta_prior)))
 
-save(passive_predict_daily_missing_models_wlag, file = 'model_outputs/passive_predict_daily_missingness_brm_schoolclosure.rda')
+save(passive_predict_daily_missing_models_wschoolclosure, file = 'model_outputs/passive_predict_daily_missingness_brm_schoolclosure.rda')
 ```
 
 ## Extract Odds Ratios from Models

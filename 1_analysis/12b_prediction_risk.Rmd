@@ -1,0 +1,261 @@
+---
+title: "Prediction analyses of missing weekly suicide risk surveys"
+output: html_document
+date: "2022-08-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+library(dbplyr)
+library(tidyverse)
+library(lubridate)
+library(lme4)
+library(mice)
+library(gghalves)
+library(emmeans)
+library(naniar)
+library(broom.mixed)
+library(lmerTest)
+library(scales)
+library(ggdist)
+library(scipub)
+library(brms)
+library(GGally)
+library(glmmTMB)
+source('model_wrapper_functions.R')
+```
+
+# Load daily data & combine with school closures
+
+```{r}
+load('../../cleaned_data/cleaned_data_for_daily_models.rda')
+load('../../cleaned_data/cleaned_baseline_data.rda')
+load('../../../cleaned_data/covid.Rda')
+covid = dplyr::select(covid, date, schoolclosure, stayathome, site) 
+covid$schoolclosure = as.numeric(as.character(covid$schoolclosure))
+covid = mutate(covid, site = ifelse(site=='PITT', 'UPMC', site))
+daily = left_join(daily, self_report_baseline, by = 'ID')
+daily = dplyr::filter(daily, day_num <= 200)
+daily = dplyr::filter(daily, TIMEPNT==6)
+
+
+load('../../cleaned_data/risk.rda')
+
+risk_missing = risk_week_present %>%
+  dplyr::filter(week_num <= 28, days ==7) %>%
+  group_by(ID) %>%
+  mutate(personal_time_z = scale(week_num),
+         summerbreak = month %in% c(7, 8),
+         site = ifelse(startsWith(ID, '1'), 'CUIMC', 'UPMC'),
+         siteCUMC = site == 'CUIMC') %>%
+  ungroup() %>%
+  left_join(., self_report_baseline, by = 'ID')
+
+
+risk_missing$date = risk_missing$week
+risk_missing = left_join(risk_missing, covid, by = c('date', 'site'))
+risk_missing = mutate(risk_missing, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+# Wrangle data
+```{r}
+daily = left_join(daily, covid, by = c('date', 'site'))
+daily = mutate(daily, schoolclosure = ifelse(date > '2022-01-01', 0, schoolclosure))
+```
+
+
+```{r}
+# Remove days after 200 days, participants who haven't finished study
+daily = dplyr::filter(daily, day_num <= 200, TIMEPNT==6) %>%
+    mutate(missing_all_passive = missing_gps +  missing_accel + missing_keyboard == 3, TRUE, FALSE) # Daily variable for whether all passive smartphone measures are miss
+```
+
+
+# Weekly Risk
+
+```{r}
+daily=mutate(daily, week = floor_date(date, unit = 'week', week_start = getOption("lubridate.week.start", 3)))
+
+weeks_missing_passive = daily %>%
+  group_by(ID, week) %>%
+  summarise(pct_passive_missing = sum(missing_all_passive)/n())
+
+risk_missing = dplyr::left_join(risk_missing, weeks_missing_passive, by = c('ID', 'week'))
+```
+
+
+# Splitting by time (within-participant validation)
+
+```{r}
+risk_missing_train = risk_missing %>%
+  group_by(ID) %>%
+  dplyr::filter(week_num <= max(week_num)/2) %>%
+  ungroup()
+
+risk_missing_test = risk_missing %>%
+  group_by(ID) %>%
+  dplyr::filter(week_num > max(week_num)/2) %>%
+  ungroup()
+
+
+m_riskbaseline1 = glmmTMB(data = risk_missing_train, risk_missing ~ 1 + (1|ID), family = binomial)
+
+m_riskclinical1 = glmmTMB(data = risk_missing_train,
+                           risk_missing ~ interview_age_years + iPhone + Asian + White + Black + hispanic + sexM + siteCUMC + 
+                             SHAPS_TOT_r_i + MFQ_i + SCARED_i + SSI19_i + INQ_burdenensomeness_i + comorbidity_current + current_medication + 
+                             current_therapy  + visit_er_pastyear + SITBI_SB_ever + SITBI_engaged_nssi_ever + (1|ID), family = binomial)
+
+m_risktemporal1 = glmmTMB(data = risk_missing_train,
+                           risk_missing ~ personal_time_z + summerbreak + schoolclosure  + pct_passive_missing + (1|ID), family = binomial)
+
+n_iter = 1000
+
+out_df_risk_within = data.frame(iter = 1:n_iter, 
+                    auc_intercepts_only = NA,
+                    auc_baseline_clinical = NA, 
+                    auc_temporal = NA)
+                    
+for (iter in 1:n_iter){
+  set.seed(iter)
+  print(iter)
+  within_test_id = sample(unique(risk_missing_test$ID), 
+                    size = round(length(unique(risk_missing$ID))*.7),
+                    replace = FALSE)
+  
+  risk_missing_test_sample = dplyr::filter(risk_missing_test, ID %in% within_test_id)
+  out_df_risk_within$auc_intercepts_only[iter] = pROC::auc(risk_missing_test_sample$risk_missing, predict(m_riskbaseline1, newdata=risk_missing_test_sample, allow.new.levels = FALSE, type = 'response'))
+  out_df_risk_within$auc_baseline_clinical[iter] = pROC::auc(risk_missing_test_sample$risk_missing, predict(m_riskclinical1, newdata=risk_missing_test_sample, allow.new.levels = FALSE, type = 'response'))
+  out_df_risk_within$auc_temporal[iter] = pROC::auc(risk_missing_test_sample$risk_missing, predict(m_risktemporal1, newdata=risk_missing_test_sample, allow.new.levels = FALSE, type = 'response'))
+}
+
+within_prediction_plot_risk = out_df_risk_within %>%
+  pivot_longer(-iter) %>%
+  dplyr::mutate(name = dplyr::recode(name, 'auc_baseline_clinical'='Baseline Clinical +\nSociodemographic Features',
+                                     'auc_intercepts_only'=' Intercepts Only',
+                                     'auc_temporal'='Temporal Features')) %>%
+  ggplot(data = ., aes(x = name, y = value)) +
+  tidybayes::stat_dist_halfeye() + 
+  geom_hline(yintercept = 0.5, lty = 2) + 
+  labs(x = 'Logistic Regression Trained on First 3 Months', y = 'AUC\nTested on Last 3 Months', title = '') +
+  theme_bw()
+```
+
+
+# Split by ID (between_participant validation)
+
+```{r}
+n_iter = 1000
+
+out_df_risk = data.frame(iter = 1:n_iter, 
+                    auc_baseline_clinical = NA, 
+                    auc_temporal = NA)
+                    
+
+for (iter in 1:n_iter){
+  set.seed(iter)
+  print(iter)
+
+  train_id = sample(unique(risk_missing$ID), 
+                    size = round(length(unique(risk_missing$ID))*.7))
+  
+  test_id = unique(risk_missing$ID)[!unique(risk_missing$ID) %in% train_id]
+  
+  risk_missing_train2 = risk_missing %>%
+    dplyr::filter(ID %in% train_id)
+  
+  risk_missing_test2 = risk_missing %>%
+    group_by(ID) %>%
+    dplyr::filter(ID %in% test_id) %>%
+    ungroup()
+
+  m_riskbaseline_clinical = glmmTMB(data = risk_missing_train2,
+                           risk_missing ~ 
+                             interview_age_years + iPhone + Asian + White + Black + hispanic + sexM + siteCUMC + 
+                             SHAPS_TOT_r_i + MFQ_i + SCARED_i + SSI19_i + INQ_burdenensomeness_i + comorbidity_current + current_medication + 
+                             current_therapy  + visit_er_pastyear + SITBI_SB_ever + SITBI_engaged_nssi_ever + (1|ID),
+                           family = binomial)
+  
+  m_risktemporal = glmmTMB(data = risk_missing_train2,
+                           risk_missing ~ personal_time_z + summerbreak + schoolclosure + pct_passive_missing + (1|ID), family = binomial)
+  
+  out_df_risk$auc_baseline_clinical[iter] = pROC::auc(risk_missing_test2$risk_missing, predict(m_riskbaseline_clinical, newdata=risk_missing_test2, allow.new.levels=TRUE))
+  out_df_risk$auc_temporal[iter] = pROC::auc(risk_missing_test2$risk_missing, predict(m_risktemporal, newdata=risk_missing_test2, allow.new.levels=TRUE))
+}
+
+
+```
+
+# Pull together all outputs (including for daily mood) for plotting
+
+```{r}
+load('model_outputs/prediction_results_daily.rda')
+
+
+auc_results_df_between$type = 'Daily Mood Survey'
+auc_results_df_within$type = 'Daily Mood Survey'
+
+out_df_risk$type = 'Weekly SI Survey'
+out_df_risk_within$type = 'Weekly SI Survey'
+
+
+prediction_results_df_between = rbind(auc_results_df_between, out_df_risk)
+prediction_results_df_within = rbind(auc_results_df_within, out_df_risk_within)
+
+save(prediction_results_df_within, prediction_results_df_between,
+     file ='model_outputs/survey_prediction_results.rda')
+
+```
+
+# Plot results
+
+```{r}
+load('model_outputs/survey_prediction_results.rda')
+
+btw_prediciton_plot_survey = prediction_results_df_between %>%
+  pivot_longer(-c(iter, type)) %>%
+  dplyr::filter(name %in% c('auc_temporal', 'auc_baseline_clinical')) %>%
+  dplyr::mutate(name = dplyr::recode(name, 'auc_baseline_clinical'='Baseline Clinical +\nSociodemographic Features',
+                                     'auc_intercepts_only'=' Intercepts Only',
+                                     'auc_temporal'='Temporal Features')) %>%
+  ggplot(data = ., aes(x = name, y = value, color = type)) +
+  tidybayes::stat_pointinterval(position = position_dodge(0.2), .width = 0.95) +
+  geom_hline(yintercept = 0.5, lty = 2) + 
+  labs(x = 'Logistic Regression Trained on 70% of Participants', y = 'AUC\nTested on Held-Out 30% of Participants', title = '',
+       color = 'Missing Data Modality Outcome') +
+  theme_bw() +
+  scale_color_manual(values= c(
+      "Daily Mood Survey" = pal2[2], 
+      "Weekly SI Survey" = pal2[5])) 
+
+
+within_prediction_plot_survey = prediction_results_df_within %>%
+  pivot_longer(-c(iter, type)) %>%
+  dplyr::mutate(name = dplyr::recode(name, 'auc_baseline_clinical'='Baseline Clinical +\nSociodemographic Features',
+                                     'auc_intercepts_only'=' Intercepts Only',
+                                     'auc_temporal'='Temporal Features')) %>%
+  ggplot(data = ., aes(x = name, y = value, color = type)) +
+  tidybayes::stat_pointinterval(position = position_dodge(0.2), .width = 0.95) +
+  labs(x = 'Logistic Regression Trained on First 3 Months', y = 'AUC\nTested on Last 3 Months', title = '') +
+  theme_bw() +
+  scale_color_manual(values= c(
+      "Daily Mood Survey" = pal2[2], 
+      "Weekly SI Survey" = pal2[5]))  +
+  theme(legend.position = 'none')
+
+
+prediction_grid_risk_missing = cowplot::plot_grid(btw_prediciton_plot_survey, within_prediction_plot_survey,
+                                                  nrow = 2, align = 'v', axis = 'lr',
+                   labels = c('A: Between-Participant Validation', 'B: Within-Participant Validation'))
+
+
+
+cowplot::save_plot(prediction_grid_risk_missing, filename = '../../figures/supplement/prediction_grid.png',
+                   base_width = 8, base_height = 8) 
+
+prediction_results_df_between %>%
+  pivot_longer(contains('auc')) %>%
+  group_by(type, name) %>%
+  median_qi()
+
+```
