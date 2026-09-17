@@ -27,3 +27,5 @@ Analyses of Missing Experience Sampling &amp; Passive Smartphone Sensor Data in 
 | [1_analysis](1_analysis)      | `model_wrapper_functions.R` |  Custom helper functions used in modeling, plotting, and wrangling data across multiple analyses |
 | [1_analysis](1_analysis)      | `run_all.sh` |  Knits all markdowns in the `1_analysis` folder |
 
+**Citation**
+Bloom, P. A., Lan, R., Galfalvy, H., Liu, Y., Bitran, A., Joyce, K., Durham, K., Porta, G., Kirshenbaum, J. S., Kamath, R., Tse, T. C., Chernick, L., Kahn, L. E., Crowley, R., Trivedi, E., Brent, D., Allen, N. B., Pagliaccio, D., & Auerbach, R. P. (2024). Identifying factors impacting missingness within smartphone-based research: Implications for intensive longitudinal studies of adolescent suicidal thoughts and behaviors. Journal of Psychopathology and Clinical Science, 133(7), 577–597. https://doi.org/10.1037/abn0000930
